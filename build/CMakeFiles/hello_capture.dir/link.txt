@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/hello_capture.dir/link.d CMakeFiles/hello_capture.dir/src/main.cpp.o -o hello_capture  -lpipewire-0.3 -lportal -lgio-2.0 -lgobject-2.0 -lglib-2.0 -lgio-2.0 -lgobject-2.0 -lglib-2.0 -lavformat -lavcodec -lswscale -lavutil

@@ -1,0 +1,3 @@
+/home/null/Documentos/recorder_moment/build/CMakeFiles/hello_capture.dir
+/home/null/Documentos/recorder_moment/build/CMakeFiles/edit_cache.dir
+/home/null/Documentos/recorder_moment/build/CMakeFiles/rebuild_cache.dir
