@@ -1,0 +1,9 @@
+# Artefactos de compilacion
+build/
+
+# Herramientas descargadas (compilador + FFmpeg, ~2 GB). No se versionan:
+# ver el README para bajarlas de nuevo si hacen falta.
+tools/
+
+# Logs y basura temporal
+*.log

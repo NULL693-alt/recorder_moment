@@ -1,8 +1,44 @@
 [
 {
-  "directory": "/home/null/Documentos/recorder_moment/build",
-  "command": "/usr/bin/c++  -I/usr/include/pipewire-0.3 -I/usr/include/spa-0.2 -I/usr/include/gio-unix-2.0 -I/usr/include/glib-2.0 -I/usr/lib/glib-2.0/include -I/usr/include/libmount -I/usr/include/blkid -I/usr/include/sysprof-6 -std=gnu++17 -D_REENTRANT -fno-strict-aliasing -fno-strict-overflow -DWITH_GZFILEOP -pthread -o CMakeFiles/hello_capture.dir/src/main.cpp.o -c /home/null/Documentos/recorder_moment/src/main.cpp",
-  "file": "/home/null/Documentos/recorder_moment/src/main.cpp",
-  "output": "CMakeFiles/hello_capture.dir/src/main.cpp.o"
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\main.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\main.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/main.cpp",
+  "output": "CMakeFiles/recorder.dir/src/main.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\dxgi_capture.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\dxgi_capture.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/dxgi_capture.cpp",
+  "output": "CMakeFiles/recorder.dir/src/dxgi_capture.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\video_encoder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\video_encoder.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/video_encoder.cpp",
+  "output": "CMakeFiles/recorder.dir/src/video_encoder.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_capture.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_capture.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/audio_capture.cpp",
+  "output": "CMakeFiles/recorder.dir/src/audio_capture.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_encoder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_encoder.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/audio_encoder.cpp",
+  "output": "CMakeFiles/recorder.dir/src/audio_encoder.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\clip_buffer.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\clip_buffer.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/clip_buffer.cpp",
+  "output": "CMakeFiles/recorder.dir/src/clip_buffer.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\recorder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\recorder.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/recorder.cpp",
+  "output": "CMakeFiles/recorder.dir/src/recorder.cpp.obj"
 }
 ]
