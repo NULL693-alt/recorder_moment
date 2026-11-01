@@ -6,7 +6,7 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
-// Ctrl+C
+// Parada (Ctrl+C en consola, o "Detener" en la interfaz).
 // ---------------------------------------------------------------------------
 static std::atomic<bool> g_stop{false};
 
@@ -24,6 +24,7 @@ static BOOL WINAPI ctrl_handler(DWORD type) {
 
 void Recorder::install_signal_handler() { SetConsoleCtrlHandler(ctrl_handler, TRUE); }
 void Recorder::request_stop() { g_stop.store(true); }
+void Recorder::clear_stop() { g_stop.store(false); }
 bool Recorder::stop_requested() { return g_stop.load(); }
 
 static int64_t now_us() {
@@ -33,18 +34,24 @@ static int64_t now_us() {
 }
 
 // ---------------------------------------------------------------------------
-Recorder::Recorder(int monitor_index, int fps, int kbps, int clip_seconds,
-                   std::string out_dir, bool audio_enabled)
-    : buffer_(clip_seconds),
-      monitor_index_(monitor_index),
-      fps_(fps > 0 ? fps : 60),
-      kbps_(kbps > 0 ? kbps : 12000),
-      clip_seconds_(clip_seconds > 0 ? clip_seconds : 120),
-      out_dir_(std::move(out_dir)),
-      audio_enabled_(audio_enabled) {}
+Recorder::Recorder(const AppConfig &cfg) : buffer_(cfg.clip_seconds), cfg_(cfg) {
+    if (cfg_.fps <= 0) cfg_.fps = 60;
+    if (cfg_.kbps <= 0) cfg_.kbps = 12000;
+    if (cfg_.clip_seconds <= 0) cfg_.clip_seconds = 120;
+    if (cfg_.out_dir.empty()) cfg_.out_dir = ".";
+    audio_enabled_ = cfg_.audio_enabled;
+}
 
 Recorder::~Recorder() {
     if (hotkey_.joinable()) hotkey_.join();
+}
+
+// ---------------------------------------------------------------------------
+// Mensajes: van a la consola (si hay) y a la interfaz (si hay).
+// ---------------------------------------------------------------------------
+void Recorder::log(const std::string &msg) {
+    fprintf(stderr, "%s\n", msg.c_str());
+    if (log_cb_) log_cb_(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -55,12 +62,13 @@ bool Recorder::ensure_capture() {
     bool first = !capture_started_;
     const int attempts = 5;
     for (int i = 0; i < attempts; i++) {
-        if (capture_.init(monitor_index_, first)) {
+        if (capture_.init(cfg_.monitor, first)) {
             capture_started_ = true;
             return true;
         }
         if (i + 1 < attempts) {
-            fprintf(stderr, "[captura] reintentando en 1s (%d/%d)...\n", i + 1, attempts);
+            log("[captura] reintentando en 1s (" + std::to_string(i + 1) + "/" +
+                std::to_string(attempts) + ")...");
             Sleep(1000);
         }
     }
@@ -74,9 +82,12 @@ bool Recorder::ensure_capture() {
 bool Recorder::start_audio() {
     if (!audio_enabled_) return false;
 
-    if (!audio_capture_.open(48000, 2) ||
-        !audio_encoder_.open(audio_capture_.sample_rate(), audio_capture_.channels(), 160)) {
-        fprintf(stderr, "[audio] no se pudo iniciar el audio; se graba solo video\n");
+    float mic_gain = (float)cfg_.mic_volume / 100.0f;
+    if (!audio_capture_.open(48000, 2, cfg_.output_device, cfg_.mic_device,
+                             cfg_.mic_enabled, mic_gain) ||
+        !audio_encoder_.open(audio_capture_.sample_rate(), audio_capture_.channels(),
+                             cfg_.audio_kbps)) {
+        log("[audio] no se pudo iniciar el audio; se graba solo video");
         audio_encoder_.close();
         audio_capture_.close();
         audio_enabled_ = false;
@@ -121,7 +132,7 @@ std::string Recorder::make_clip_path() const {
     std::snprintf(name, sizeof(name), "clip_%04d%02d%02d_%02d%02d%02d.mp4",
                   tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
                   tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
-    std::string dir = out_dir_;
+    std::string dir = cfg_.out_dir;
     if (!dir.empty() && dir.back() != '\\' && dir.back() != '/') dir += '\\';
     return dir + name;
 }
@@ -131,20 +142,19 @@ std::string Recorder::make_clip_path() const {
 // ---------------------------------------------------------------------------
 void Recorder::handle_save() {
     if (!encoder_.is_open() || buffer_.count() == 0) {
-        fprintf(stderr, "\n[clip] todavia no hay video capturado para guardar\n");
+        log("[clip] todavia no hay video capturado para guardar");
         return;
     }
     std::string path = make_clip_path();
     double secs = buffer_.buffered_seconds();
     const AVCodecParameters *apar =
         (audio_enabled_ && audio_encoder_.is_open()) ? audio_encoder_.codecpar() : nullptr;
-    fprintf(stderr, "\n[clip] guardando ultimos %.0f s en %s ...\n", secs, path.c_str());
+    log("[clip] guardando ultimos " + std::to_string((int)secs) + " s en " + path + " ...");
     if (buffer_.save_to(path, encoder_.codecpar(), encoder_.time_base(), apar,
                         audio_encoder_.time_base()))
-        fprintf(stderr, "[clip] listo: %s (%.0f s, %ld frames)\n", path.c_str(), secs,
-                (long)frame_count_);
+        log("[clip] listo: " + path);
     else
-        fprintf(stderr, "[clip] no se pudo guardar el clip\n");
+        log("[clip] no se pudo guardar el clip");
 }
 
 // ---------------------------------------------------------------------------
@@ -162,12 +172,12 @@ void Recorder::hotkey_thread() {
 }
 
 // ---------------------------------------------------------------------------
-// Linea de estado
+// Linea de estado (solo consola)
 // ---------------------------------------------------------------------------
-void Recorder::print_status(int64_t buffer_ms) {
+void Recorder::print_status(double buffer_s) {
     fprintf(stderr, "\r[grabando] %ld frames | buffer %.0f s / %d s | F9 = guardar clip | "
                     "Ctrl+C = salir   ",
-            (long)frame_count_, buffer_ms / 1000.0, clip_seconds_);
+            frames_.load(), buffer_s, cfg_.clip_seconds);
     fflush(stderr);
 }
 
@@ -176,17 +186,15 @@ void Recorder::print_status(int64_t buffer_ms) {
 // ---------------------------------------------------------------------------
 bool Recorder::run() {
     if (!ensure_capture()) {
-        fprintf(stderr, "\nNo se pudo iniciar la captura de pantalla.\n");
+        log("No se pudo iniciar la captura de pantalla.");
         return false;
     }
 
-    fprintf(stderr,
-            "Capturando el monitor #%d. %s Apreta F9 para guardar los ultimos %d s "
-            "en un clip. Ctrl+C para salir.\n",
-            monitor_index_,
-            audio_enabled_ ? "Con audio (sistema + microfono)." : "Sin audio.", clip_seconds_);
+    log("Capturando el monitor #" + std::to_string(cfg_.monitor) +
+        (audio_enabled_ ? " con audio." : " sin audio."));
 
     start_audio();
+    running_.store(true);
 
     hotkey_ = std::thread(&Recorder::hotkey_thread, this);
 
@@ -194,15 +202,15 @@ bool Recorder::run() {
         DxgiCapture::Result r = capture_.acquire(200);
 
         if (r == DxgiCapture::Result::AccessLost) {
-            fprintf(stderr, "\n[captura] se perdio la duplicacion, reconectando...\n");
+            log("[captura] se perdio la duplicacion, reconectando...");
             if (!ensure_capture()) {
-                failed_ = true;
+                failed_.store(true);
                 break;
             }
             continue;
         }
         if (r == DxgiCapture::Result::Error) {
-            failed_ = true;
+            failed_.store(true);
             break;
         }
 
@@ -218,8 +226,9 @@ bool Recorder::run() {
                     default: fmt = AV_PIX_FMT_NONE; break;
                 }
                 if (fmt == AV_PIX_FMT_NONE ||
-                    !encoder_.open(capture_.width(), capture_.height(), fps_, kbps_, fmt)) {
-                    failed_ = true;
+                    !encoder_.open(capture_.width(), capture_.height(), cfg_.fps, cfg_.kbps,
+                                   fmt, cfg_.out_height)) {
+                    failed_.store(true);
                     break;
                 }
             }
@@ -235,13 +244,14 @@ bool Recorder::run() {
                                               (pkt->flags & AV_PKT_FLAG_KEY) != 0);
                                       });
             if (!ok) {
-                failed_ = true;
+                failed_.store(true);
                 break;
             }
-            frame_count_++;
+            frames_.fetch_add(1);
 
-            if (frame_count_ % 60 == 0)
-                print_status((int64_t)buffer_.buffered_seconds() * 1000);
+            double buf_s = buffer_.buffered_seconds();
+            buffer_seconds_.store(buf_s);
+            if (frames_.load() % 60 == 0) print_status(buf_s);
         }
 
         // El audio corre aparte del video: se bombea en cada vuelta para que no
@@ -252,20 +262,18 @@ bool Recorder::run() {
         if (save_requested_.exchange(false)) handle_save();
     }
 
+    running_.store(false);
     Recorder::request_stop();
     if (hotkey_.joinable()) hotkey_.join();
     audio_capture_.close();
     audio_encoder_.close();
 
     fprintf(stderr, "\n");
-    if (!failed_ && frame_count_ == 0) {
-        fprintf(stderr, "No se capturo nada (no hubo cambios en la pantalla).\n");
-        return false;
-    }
-    if (failed_) {
-        fprintf(stderr, "Algo fallo durante la grabacion. Revisa el mensaje de arriba.\n");
-        return false;
-    }
-    fprintf(stderr, "Listo. Saliste despues de %ld frames.\n", (long)frame_count_);
-    return true;
+    if (!failed_.load() && frames_.load() == 0)
+        log("No se capturo nada (no hubo cambios en la pantalla).");
+    else if (failed_.load())
+        log("Algo fallo durante la grabacion.");
+    else
+        log("Grabacion detenida.");
+    return !failed_.load();
 }

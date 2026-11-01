@@ -1,44 +1,98 @@
 [
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\main.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\main.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\main.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\main.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/main.cpp",
   "output": "CMakeFiles/recorder.dir/src/main.cpp.obj"
 },
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\dxgi_capture.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\dxgi_capture.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\gui.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\gui.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/gui.cpp",
+  "output": "CMakeFiles/recorder.dir/src/gui.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\dxgi_capture.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\dxgi_capture.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/dxgi_capture.cpp",
   "output": "CMakeFiles/recorder.dir/src/dxgi_capture.cpp.obj"
 },
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\video_encoder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\video_encoder.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\video_encoder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\video_encoder.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/video_encoder.cpp",
   "output": "CMakeFiles/recorder.dir/src/video_encoder.cpp.obj"
 },
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_capture.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_capture.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_capture.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_capture.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/audio_capture.cpp",
   "output": "CMakeFiles/recorder.dir/src/audio_capture.cpp.obj"
 },
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_encoder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_encoder.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_encoder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_encoder.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/audio_encoder.cpp",
   "output": "CMakeFiles/recorder.dir/src/audio_encoder.cpp.obj"
 },
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\clip_buffer.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\clip_buffer.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\audio_devices.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\audio_devices.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/audio_devices.cpp",
+  "output": "CMakeFiles/recorder.dir/src/audio_devices.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\clip_buffer.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\clip_buffer.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/clip_buffer.cpp",
   "output": "CMakeFiles/recorder.dir/src/clip_buffer.cpp.obj"
 },
 {
   "directory": "C:/Users/NULL/Documents/recorder_moment/build",
-  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe  @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\recorder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\recorder.cpp",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\config.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\config.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/src/config.cpp",
+  "output": "CMakeFiles/recorder.dir/src/config.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\src\\recorder.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\src\\recorder.cpp",
   "file": "C:/Users/NULL/Documents/recorder_moment/src/recorder.cpp",
   "output": "CMakeFiles/recorder.dir/src/recorder.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\third_party\\imgui\\imgui.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\third_party\\imgui\\imgui.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/third_party/imgui/imgui.cpp",
+  "output": "CMakeFiles/recorder.dir/third_party/imgui/imgui.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\third_party\\imgui\\imgui_draw.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\third_party\\imgui\\imgui_draw.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/third_party/imgui/imgui_draw.cpp",
+  "output": "CMakeFiles/recorder.dir/third_party/imgui/imgui_draw.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\third_party\\imgui\\imgui_tables.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\third_party\\imgui\\imgui_tables.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/third_party/imgui/imgui_tables.cpp",
+  "output": "CMakeFiles/recorder.dir/third_party/imgui/imgui_tables.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\third_party\\imgui\\imgui_widgets.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\third_party\\imgui\\imgui_widgets.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/third_party/imgui/imgui_widgets.cpp",
+  "output": "CMakeFiles/recorder.dir/third_party/imgui/imgui_widgets.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\third_party\\imgui\\backends\\imgui_impl_win32.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\third_party\\imgui\\backends\\imgui_impl_win32.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/third_party/imgui/backends/imgui_impl_win32.cpp",
+  "output": "CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_win32.cpp.obj"
+},
+{
+  "directory": "C:/Users/NULL/Documents/recorder_moment/build",
+  "command": "C:\\Users\\NULL\\Documents\\recorder_moment\\tools\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles\\recorder.dir\\includes_CXX.rsp -O3 -DNDEBUG -std=gnu++17 -Wall -o CMakeFiles\\recorder.dir\\third_party\\imgui\\backends\\imgui_impl_dx11.cpp.obj -c C:\\Users\\NULL\\Documents\\recorder_moment\\third_party\\imgui\\backends\\imgui_impl_dx11.cpp",
+  "file": "C:/Users/NULL/Documents/recorder_moment/third_party/imgui/backends/imgui_impl_dx11.cpp",
+  "output": "CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_dx11.cpp.obj"
 }
 ]

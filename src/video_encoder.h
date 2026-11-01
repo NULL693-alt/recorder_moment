@@ -35,8 +35,11 @@ public:
     VideoEncoder &operator=(const VideoEncoder &) = delete;
 
     // src_fmt es el formato en el que entrega la captura: AV_PIX_FMT_BGRA,
-    // AV_PIX_FMT_RGBA o AV_PIX_FMT_RGBAF16 (HDR).
-    bool open(int width, int height, int fps, int bitrate_kbps, AVPixelFormat src_fmt);
+    // AV_PIX_FMT_RGBA o AV_PIX_FMT_RGBAF16 (HDR). target_height, si es mayor
+    // que 0 y menor que la altura capturada, reescala el video de salida a esa
+    // altura (manteniendo la relacion de aspecto); 0 = resolucion nativa.
+    bool open(int width, int height, int fps, int bitrate_kbps, AVPixelFormat src_fmt,
+              int target_height = 0);
     void close();
 
     // Codifica un frame ya capturado. pts_us es la marca de tiempo en
@@ -51,6 +54,8 @@ public:
     const char *name() const { return encoder_name_; }
     bool is_open() const { return codec_ctx_ != nullptr; }
     bool hdr_tonemap() const { return hdr_tonemap_; }
+    int out_width() const { return out_width_; }
+    int out_height() const { return out_height_; }
 
 private:
     struct Candidate {
@@ -77,6 +82,8 @@ private:
 
     int width_ = 0;
     int height_ = 0;
+    int out_width_ = 0;  // resolucion del video codificado
+    int out_height_ = 0;
 
     std::vector<uint8_t> tonemap_buf_;
     std::vector<uint8_t> srgb_lut_; // tabla lineal -> 8 bits sRGB

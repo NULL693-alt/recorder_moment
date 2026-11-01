@@ -84,12 +84,12 @@ clean: CMakeFiles/recorder.dir/clean
 CMakeFiles/recorder.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles --progress-num=1,2,3,4,5,6,7,8 "Built target recorder"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles --progress-num=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18 "Built target recorder"
 .PHONY : CMakeFiles/recorder.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/recorder.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles 8
+	$(CMAKE_COMMAND) -E cmake_progress_start C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles 18
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 CMakeFiles/recorder.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles 0
 .PHONY : CMakeFiles/recorder.dir/rule
@@ -101,7 +101,7 @@ recorder: CMakeFiles/recorder.dir/rule
 # codegen rule for target.
 CMakeFiles/recorder.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles --progress-num=1,2,3,4,5,6,7,8 "Finished codegen for target recorder"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=C:\Users\NULL\Documents\recorder_moment\build\CMakeFiles --progress-num=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18 "Finished codegen for target recorder"
 .PHONY : CMakeFiles/recorder.dir/codegen
 
 # clean rule for target.

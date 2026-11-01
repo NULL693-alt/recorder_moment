@@ -33,6 +33,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -48,10 +49,15 @@ public:
     AudioCapture(const AudioCapture &) = delete;
     AudioCapture &operator=(const AudioCapture &) = delete;
 
-    // Abre el loopback del sistema y (si hay) el microfono, y arranca la
+    // Abre el loopback del sistema y (si enable_mic) el microfono, y arranca la
     // captura en un hilo aparte. Devuelve false solo si no se pudo capturar
-    // el audio del sistema.
-    bool open(int sample_rate = 48000, int channels = 2);
+    // el audio del sistema. sys_id/mic_id son ids de WASAPI; vacio = el
+    // dispositivo predeterminado. mic_gain es el volumen del microfono
+    // (1.0 = 100%).
+    bool open(int sample_rate = 48000, int channels = 2,
+              const std::string &sys_id = std::string(),
+              const std::string &mic_id = std::string(), bool enable_mic = true,
+              float mic_gain = 1.0f);
     void close();
 
     // Saca hasta max_frames frames mezclados (16 bits intercalados). Devuelve
@@ -81,7 +87,7 @@ private:
         bool ok = false;
     };
 
-    bool open_source(Source &s, EDataFlow flow, bool loopback);
+    bool open_source(Source &s, EDataFlow flow, bool loopback, const std::string &device_id);
     void close_source(Source &s);
     void thread_main();
     void drain(Source &s);
@@ -100,6 +106,7 @@ private:
     int sample_rate_ = 48000;
     int channels_ = 2;
     bool has_mic_ = false;
+    float mic_gain_ = 1.0f; // volumen del microfono (1.0 = 100%)
 
     mutable std::mutex mutex_;
     std::vector<int16_t> out_fifo_; // mezcla lista para leer

@@ -6,6 +6,11 @@ lo que pasa en el monitor y, al apretar una tecla, guarda ese pedazo en un
 misma pista), tambien graba HDR (convirtiendolo a SDR) y funciona al mismo
 tiempo que OBS, Discord o la Xbox Game Bar.
 
+Trae una **interfaz grafica** (Dear ImGui sobre Direct3D 11): se abre una
+ventana con el panel de ajustes y los botones de **Iniciar / Detener /
+Guardar clip**, y se puede mandar a la **bandeja del sistema** (junto al
+reloj). No hace falta consola ni tocar la linea de comandos.
+
 Originalmente este proyecto era para Linux (CachyOS): la captura se hacia con
 el portal XDG (`libportal` + PipeWire) y se codificaba en la GPU Intel con
 VAAPI (`h264_vaapi`). Esa version ya no existe; el proyecto ahora es **solo
@@ -48,13 +53,21 @@ Mientras corre, el programa:
 
 ```
 src/
-  main.cpp          arranque y linea de comandos
+  main.cpp          arranque, modo GUI y modo --cli (linea de comandos)
+  gui.*             ventana (Dear ImGui + Direct3D 11) y bandeja del sistema
+  config.*          ajustes persistentes (recorder_config.ini)
+  audio_devices.*   enumerar microfonos y dispositivos de salida
   dxgi_capture.*    captura de pantalla (DirectX 11)
   video_encoder.*   codificacion y conversion de color (FFmpeg)
   audio_capture.*   captura de audio (WASAPI: sistema + microfono)
   audio_encoder.*   codificacion de audio (AAC, FFmpeg)
   clip_buffer.*     buffer circular de los ultimos N segundos
   recorder.*        orquesta todo y maneja los atajos
+third_party/
+  imgui/            Dear ImGui (solo el core + backends de Win32 y D3D11)
+resources/
+  recorder.rc       icono y metadatos de version del .exe
+  app.ico           icono (ventana, bandeja y explorador)
 ```
 
 ## Requisitos
@@ -104,18 +117,51 @@ igual).
 
 ## Ejecutar
 
+### Interfaz grafica (por defecto)
+
+Doble clic en `build\recorder.exe` (o desde PowerShell, `.\build\recorder.exe`).
+Se abre una ventana con:
+
+- **Carpeta de clips**: donde se guardan los `.mp4` (boton *Carpeta...* para
+  elegirla).
+- **Monitor**, **FPS**, **Bitrate de video** y **Duracion del buffer**
+  (segundos).
+- **Resolucion de salida**: *Nativa* (la del monitor) o una altura menor
+  (2160p/1440p/1080p/720p/480p/360p) para que los clips pesen menos.
+- **Grabar audio** y **Grabar microfono**, mas dos desplegables para elegir el
+  dispositivo de salida y el **microfono** (con *Refrescar dispositivos*),
+  un **volumen del microfono** (0–200%) y el **bitrate de audio** (64–320
+  kbps).
+- **Iniciar** / **Detener** y **Guardar clip (F9)**, con el estado en vivo
+  (frames capturados y cuanto llena el buffer).
+- **Minimizar a la bandeja al cerrar**: si esta marcado, cerrar la ventana no
+  sale del programa, lo deja en la **bandeja del sistema** (icono junto al
+  reloj). Desde ahi, click derecho para *Mostrar*, *Iniciar/Detener*,
+  *Guardar clip*, *Abrir carpeta de clips* o *Salir*.
+- **Iniciar con Windows**: si esta marcado, el programa se abre solo al
+  encender la PC. Para que ademas arranque escondido y grabando, marca tambien
+  *Minimizar a la bandeja al cerrar*. Se puede desactivar destildando la
+  casilla (no toca nada mas de tu sistema).
+
+Los ajustes se guardan solos en `recorder_config.ini`, al lado del `.exe`, asi
+que la proxima vez arranca como lo dejaste.
+
+### Linea de comandos (`--cli`)
+
+Si preferis la version de consola (sin ventana), pasa `--cli`:
+
 ```powershell
-.\build\recorder.exe                                   # carpeta actual, monitor 0, 60 fps, 12000 kbps, 120 s, con audio
-.\build\recorder.exe clips                             # guarda en la carpeta clips\
-.\build\recorder.exe clips 1                           # el monitor 1
-.\build\recorder.exe clips 1 60 20000 60               # monitor 1, 60 fps, 20 Mbps, clips de 60 s
-.\build\recorder.exe clips 0 60 12000 120 --no-audio   # solo video, sin audio
+.\build\recorder.exe --cli                                 # carpeta actual, monitor 0, 60 fps, 12000 kbps, 120 s, con audio
+.\build\recorder.exe --cli clips                           # guarda en la carpeta clips\
+.\build\recorder.exe --cli clips 1                         # el monitor 1
+.\build\recorder.exe --cli clips 1 60 20000 60             # monitor 1, 60 fps, 20 Mbps, clips de 60 s
+.\build\recorder.exe --cli clips 0 60 12000 120 --no-audio # solo video, sin audio
 ```
 
 Los argumentos son, en orden:
 
 ```
-recorder.exe [carpeta_salida] [monitor] [fps] [kbps] [segundos] [--no-audio]
+recorder.exe --cli [carpeta_salida] [monitor] [fps] [kbps] [segundos] [--no-audio]
 ```
 
 Todos son opcionales; los valores por defecto son la **carpeta actual**,
@@ -141,6 +187,21 @@ Capturando el monitor #0. Con audio (sistema + microfono). Apreta F9 para guarda
 [clip] guardando ultimos 120 s en .\clip_20261031_220630.mp4 ...
 [clip] listo: .\clip_20261031_220630.mp4 (120 s, 7200 frames)
 ```
+
+## Compartir (carpeta portable)
+
+Para pasarle el programa a alguien, corre `package.ps1`: arma una carpeta
+portable con el `.exe` y las DLLs de FFmpeg, y un `.zip` listo para mandar:
+
+```powershell
+$env:Path = "$PWD\tools\mingw64\bin;" + $env:Path
+cmake --build build
+.\package.ps1
+```
+
+Queda en `dist\recorder_moment\` (carpeta) y `dist\recorder_moment.zip`. La otra
+persona solo descomprime y hace doble clic en `recorder.exe`: no necesita
+instalar nada.
 
 ## Cosas a tener en cuenta
 

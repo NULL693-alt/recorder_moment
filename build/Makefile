@@ -128,6 +128,14 @@ recorder/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/build
 .PHONY : recorder/fast
 
+resources/recorder.obj: resources/recorder.rc.obj
+.PHONY : resources/recorder.obj
+
+# target to build an object file
+resources/recorder.rc.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/resources/recorder.rc.obj
+.PHONY : resources/recorder.rc.obj
+
 src/audio_capture.obj: src/audio_capture.cpp.obj
 .PHONY : src/audio_capture.obj
 
@@ -151,6 +159,30 @@ src/audio_capture.s: src/audio_capture.cpp.s
 src/audio_capture.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/audio_capture.cpp.s
 .PHONY : src/audio_capture.cpp.s
+
+src/audio_devices.obj: src/audio_devices.cpp.obj
+.PHONY : src/audio_devices.obj
+
+# target to build an object file
+src/audio_devices.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/audio_devices.cpp.obj
+.PHONY : src/audio_devices.cpp.obj
+
+src/audio_devices.i: src/audio_devices.cpp.i
+.PHONY : src/audio_devices.i
+
+# target to preprocess a source file
+src/audio_devices.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/audio_devices.cpp.i
+.PHONY : src/audio_devices.cpp.i
+
+src/audio_devices.s: src/audio_devices.cpp.s
+.PHONY : src/audio_devices.s
+
+# target to generate assembly for a file
+src/audio_devices.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/audio_devices.cpp.s
+.PHONY : src/audio_devices.cpp.s
 
 src/audio_encoder.obj: src/audio_encoder.cpp.obj
 .PHONY : src/audio_encoder.obj
@@ -200,6 +232,30 @@ src/clip_buffer.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/clip_buffer.cpp.s
 .PHONY : src/clip_buffer.cpp.s
 
+src/config.obj: src/config.cpp.obj
+.PHONY : src/config.obj
+
+# target to build an object file
+src/config.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/config.cpp.obj
+.PHONY : src/config.cpp.obj
+
+src/config.i: src/config.cpp.i
+.PHONY : src/config.i
+
+# target to preprocess a source file
+src/config.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/config.cpp.i
+.PHONY : src/config.cpp.i
+
+src/config.s: src/config.cpp.s
+.PHONY : src/config.s
+
+# target to generate assembly for a file
+src/config.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/config.cpp.s
+.PHONY : src/config.cpp.s
+
 src/dxgi_capture.obj: src/dxgi_capture.cpp.obj
 .PHONY : src/dxgi_capture.obj
 
@@ -223,6 +279,30 @@ src/dxgi_capture.s: src/dxgi_capture.cpp.s
 src/dxgi_capture.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/dxgi_capture.cpp.s
 .PHONY : src/dxgi_capture.cpp.s
+
+src/gui.obj: src/gui.cpp.obj
+.PHONY : src/gui.obj
+
+# target to build an object file
+src/gui.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/gui.cpp.obj
+.PHONY : src/gui.cpp.obj
+
+src/gui.i: src/gui.cpp.i
+.PHONY : src/gui.i
+
+# target to preprocess a source file
+src/gui.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/gui.cpp.i
+.PHONY : src/gui.cpp.i
+
+src/gui.s: src/gui.cpp.s
+.PHONY : src/gui.s
+
+# target to generate assembly for a file
+src/gui.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/gui.cpp.s
+.PHONY : src/gui.cpp.s
 
 src/main.obj: src/main.cpp.obj
 .PHONY : src/main.obj
@@ -296,6 +376,150 @@ src/video_encoder.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/src/video_encoder.cpp.s
 .PHONY : src/video_encoder.cpp.s
 
+third_party/imgui/backends/imgui_impl_dx11.obj: third_party/imgui/backends/imgui_impl_dx11.cpp.obj
+.PHONY : third_party/imgui/backends/imgui_impl_dx11.obj
+
+# target to build an object file
+third_party/imgui/backends/imgui_impl_dx11.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_dx11.cpp.obj
+.PHONY : third_party/imgui/backends/imgui_impl_dx11.cpp.obj
+
+third_party/imgui/backends/imgui_impl_dx11.i: third_party/imgui/backends/imgui_impl_dx11.cpp.i
+.PHONY : third_party/imgui/backends/imgui_impl_dx11.i
+
+# target to preprocess a source file
+third_party/imgui/backends/imgui_impl_dx11.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_dx11.cpp.i
+.PHONY : third_party/imgui/backends/imgui_impl_dx11.cpp.i
+
+third_party/imgui/backends/imgui_impl_dx11.s: third_party/imgui/backends/imgui_impl_dx11.cpp.s
+.PHONY : third_party/imgui/backends/imgui_impl_dx11.s
+
+# target to generate assembly for a file
+third_party/imgui/backends/imgui_impl_dx11.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_dx11.cpp.s
+.PHONY : third_party/imgui/backends/imgui_impl_dx11.cpp.s
+
+third_party/imgui/backends/imgui_impl_win32.obj: third_party/imgui/backends/imgui_impl_win32.cpp.obj
+.PHONY : third_party/imgui/backends/imgui_impl_win32.obj
+
+# target to build an object file
+third_party/imgui/backends/imgui_impl_win32.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_win32.cpp.obj
+.PHONY : third_party/imgui/backends/imgui_impl_win32.cpp.obj
+
+third_party/imgui/backends/imgui_impl_win32.i: third_party/imgui/backends/imgui_impl_win32.cpp.i
+.PHONY : third_party/imgui/backends/imgui_impl_win32.i
+
+# target to preprocess a source file
+third_party/imgui/backends/imgui_impl_win32.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_win32.cpp.i
+.PHONY : third_party/imgui/backends/imgui_impl_win32.cpp.i
+
+third_party/imgui/backends/imgui_impl_win32.s: third_party/imgui/backends/imgui_impl_win32.cpp.s
+.PHONY : third_party/imgui/backends/imgui_impl_win32.s
+
+# target to generate assembly for a file
+third_party/imgui/backends/imgui_impl_win32.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/backends/imgui_impl_win32.cpp.s
+.PHONY : third_party/imgui/backends/imgui_impl_win32.cpp.s
+
+third_party/imgui/imgui.obj: third_party/imgui/imgui.cpp.obj
+.PHONY : third_party/imgui/imgui.obj
+
+# target to build an object file
+third_party/imgui/imgui.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui.cpp.obj
+.PHONY : third_party/imgui/imgui.cpp.obj
+
+third_party/imgui/imgui.i: third_party/imgui/imgui.cpp.i
+.PHONY : third_party/imgui/imgui.i
+
+# target to preprocess a source file
+third_party/imgui/imgui.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui.cpp.i
+.PHONY : third_party/imgui/imgui.cpp.i
+
+third_party/imgui/imgui.s: third_party/imgui/imgui.cpp.s
+.PHONY : third_party/imgui/imgui.s
+
+# target to generate assembly for a file
+third_party/imgui/imgui.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui.cpp.s
+.PHONY : third_party/imgui/imgui.cpp.s
+
+third_party/imgui/imgui_draw.obj: third_party/imgui/imgui_draw.cpp.obj
+.PHONY : third_party/imgui/imgui_draw.obj
+
+# target to build an object file
+third_party/imgui/imgui_draw.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_draw.cpp.obj
+.PHONY : third_party/imgui/imgui_draw.cpp.obj
+
+third_party/imgui/imgui_draw.i: third_party/imgui/imgui_draw.cpp.i
+.PHONY : third_party/imgui/imgui_draw.i
+
+# target to preprocess a source file
+third_party/imgui/imgui_draw.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_draw.cpp.i
+.PHONY : third_party/imgui/imgui_draw.cpp.i
+
+third_party/imgui/imgui_draw.s: third_party/imgui/imgui_draw.cpp.s
+.PHONY : third_party/imgui/imgui_draw.s
+
+# target to generate assembly for a file
+third_party/imgui/imgui_draw.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_draw.cpp.s
+.PHONY : third_party/imgui/imgui_draw.cpp.s
+
+third_party/imgui/imgui_tables.obj: third_party/imgui/imgui_tables.cpp.obj
+.PHONY : third_party/imgui/imgui_tables.obj
+
+# target to build an object file
+third_party/imgui/imgui_tables.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_tables.cpp.obj
+.PHONY : third_party/imgui/imgui_tables.cpp.obj
+
+third_party/imgui/imgui_tables.i: third_party/imgui/imgui_tables.cpp.i
+.PHONY : third_party/imgui/imgui_tables.i
+
+# target to preprocess a source file
+third_party/imgui/imgui_tables.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_tables.cpp.i
+.PHONY : third_party/imgui/imgui_tables.cpp.i
+
+third_party/imgui/imgui_tables.s: third_party/imgui/imgui_tables.cpp.s
+.PHONY : third_party/imgui/imgui_tables.s
+
+# target to generate assembly for a file
+third_party/imgui/imgui_tables.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_tables.cpp.s
+.PHONY : third_party/imgui/imgui_tables.cpp.s
+
+third_party/imgui/imgui_widgets.obj: third_party/imgui/imgui_widgets.cpp.obj
+.PHONY : third_party/imgui/imgui_widgets.obj
+
+# target to build an object file
+third_party/imgui/imgui_widgets.cpp.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_widgets.cpp.obj
+.PHONY : third_party/imgui/imgui_widgets.cpp.obj
+
+third_party/imgui/imgui_widgets.i: third_party/imgui/imgui_widgets.cpp.i
+.PHONY : third_party/imgui/imgui_widgets.i
+
+# target to preprocess a source file
+third_party/imgui/imgui_widgets.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_widgets.cpp.i
+.PHONY : third_party/imgui/imgui_widgets.cpp.i
+
+third_party/imgui/imgui_widgets.s: third_party/imgui/imgui_widgets.cpp.s
+.PHONY : third_party/imgui/imgui_widgets.s
+
+# target to generate assembly for a file
+third_party/imgui/imgui_widgets.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\recorder.dir\build.make CMakeFiles/recorder.dir/third_party/imgui/imgui_widgets.cpp.s
+.PHONY : third_party/imgui/imgui_widgets.cpp.s
+
 # Help Target
 help:
 	@echo The following are some of the valid targets for this Makefile:
@@ -305,18 +529,28 @@ help:
 	@echo ... edit_cache
 	@echo ... rebuild_cache
 	@echo ... recorder
+	@echo ... resources/recorder.obj
 	@echo ... src/audio_capture.obj
 	@echo ... src/audio_capture.i
 	@echo ... src/audio_capture.s
+	@echo ... src/audio_devices.obj
+	@echo ... src/audio_devices.i
+	@echo ... src/audio_devices.s
 	@echo ... src/audio_encoder.obj
 	@echo ... src/audio_encoder.i
 	@echo ... src/audio_encoder.s
 	@echo ... src/clip_buffer.obj
 	@echo ... src/clip_buffer.i
 	@echo ... src/clip_buffer.s
+	@echo ... src/config.obj
+	@echo ... src/config.i
+	@echo ... src/config.s
 	@echo ... src/dxgi_capture.obj
 	@echo ... src/dxgi_capture.i
 	@echo ... src/dxgi_capture.s
+	@echo ... src/gui.obj
+	@echo ... src/gui.i
+	@echo ... src/gui.s
 	@echo ... src/main.obj
 	@echo ... src/main.i
 	@echo ... src/main.s
@@ -326,6 +560,24 @@ help:
 	@echo ... src/video_encoder.obj
 	@echo ... src/video_encoder.i
 	@echo ... src/video_encoder.s
+	@echo ... third_party/imgui/backends/imgui_impl_dx11.obj
+	@echo ... third_party/imgui/backends/imgui_impl_dx11.i
+	@echo ... third_party/imgui/backends/imgui_impl_dx11.s
+	@echo ... third_party/imgui/backends/imgui_impl_win32.obj
+	@echo ... third_party/imgui/backends/imgui_impl_win32.i
+	@echo ... third_party/imgui/backends/imgui_impl_win32.s
+	@echo ... third_party/imgui/imgui.obj
+	@echo ... third_party/imgui/imgui.i
+	@echo ... third_party/imgui/imgui.s
+	@echo ... third_party/imgui/imgui_draw.obj
+	@echo ... third_party/imgui/imgui_draw.i
+	@echo ... third_party/imgui/imgui_draw.s
+	@echo ... third_party/imgui/imgui_tables.obj
+	@echo ... third_party/imgui/imgui_tables.i
+	@echo ... third_party/imgui/imgui_tables.s
+	@echo ... third_party/imgui/imgui_widgets.obj
+	@echo ... third_party/imgui/imgui_widgets.i
+	@echo ... third_party/imgui/imgui_widgets.s
 .PHONY : help
 
 

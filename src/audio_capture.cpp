@@ -29,6 +29,15 @@ static int64_t now_us() {
         .count();
 }
 
+// Los ids de WASAPI son ASCII, pero por las dudas convertimos bien.
+static std::wstring utf8_to_wide(const std::string &s) {
+    if (s.empty()) return std::wstring();
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    std::wstring out((size_t)len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], len);
+    return out;
+}
+
 // Traduce el formato que entrega WASAPI al que entiende swresample.
 static AVSampleFormat wave_to_av(const WAVEFORMATEX *fmt) {
     if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) return AV_SAMPLE_FMT_FLT;
@@ -50,13 +59,21 @@ AudioCapture::~AudioCapture() { close(); }
 // ---------------------------------------------------------------------------
 // Abrir un endpoint
 // ---------------------------------------------------------------------------
-bool AudioCapture::open_source(Source &s, EDataFlow flow, bool loopback) {
+bool AudioCapture::open_source(Source &s, EDataFlow flow, bool loopback,
+                               const std::string &device_id) {
     IMMDeviceEnumerator *enumerator = nullptr;
     HRESULT hr = CoCreateInstance(kClsidMMDeviceEnumerator, nullptr, CLSCTX_ALL,
                                   __uuidof(IMMDeviceEnumerator), (void **)&enumerator);
     if (FAILED(hr)) return false;
 
-    hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, &s.device);
+    if (device_id.empty()) {
+        hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, &s.device);
+    } else {
+        std::wstring wid = utf8_to_wide(device_id);
+        hr = enumerator->GetDevice(wid.c_str(), &s.device);
+        if (FAILED(hr)) // si el dispositivo guardado ya no existe, usamos el predeterminado
+            hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, &s.device);
+    }
     enumerator->Release();
     if (FAILED(hr)) return false;
 
@@ -136,10 +153,12 @@ void AudioCapture::close_source(Source &s) {
 // ---------------------------------------------------------------------------
 // open / close
 // ---------------------------------------------------------------------------
-bool AudioCapture::open(int sample_rate, int channels) {
+bool AudioCapture::open(int sample_rate, int channels, const std::string &sys_id,
+                        const std::string &mic_id, bool enable_mic, float mic_gain) {
     if (running_.load()) return true;
     sample_rate_ = sample_rate > 0 ? sample_rate : 48000;
     channels_ = channels > 0 ? channels : 2;
+    mic_gain_ = mic_gain;
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(hr)) {
@@ -149,17 +168,17 @@ bool AudioCapture::open(int sample_rate, int channels) {
         return false;
     }
 
-    if (!open_source(sys_, eRender, true)) {
+    if (!open_source(sys_, eRender, true, sys_id)) {
         fprintf(stderr, "[audio] no pude capturar el audio del sistema\n");
         close_source(sys_);
         if (com_inited_) { CoUninitialize(); com_inited_ = false; }
         return false;
     }
 
-    if (open_source(mic_, eCapture, false)) {
+    if (enable_mic && open_source(mic_, eCapture, false, mic_id)) {
         has_mic_ = true;
     } else {
-        fprintf(stderr, "[audio] no hay microfono disponible; se graba solo el sistema\n");
+        if (enable_mic) fprintf(stderr, "[audio] no hay microfono disponible; se graba solo el sistema\n");
         close_source(mic_);
     }
 
@@ -261,11 +280,14 @@ void AudioCapture::produce_locked() {
 
         int sys_frames = (int)(sys_.fifo.size() / channels_);
         int mic_frames = has_mic_ ? (int)(mic_.fifo.size() / channels_) : 0;
+        const float mic_gain = mic_gain_;
 
         for (int f = 0; f < block; f++) {
             for (int c = 0; c < channels_; c++) {
                 int a = (f < sys_frames) ? sys_.fifo[(size_t)f * channels_ + c] : 0;
                 int b = (f < mic_frames && has_mic_) ? mic_.fifo[(size_t)f * channels_ + c] : 0;
+                if (mic_gain != 1.0f && b != 0)
+                    b = (int)(b * mic_gain + (b > 0 ? 0.5f : -0.5f));
                 int v = a + b;
                 if (v > 32767) v = 32767;
                 if (v < -32768) v = -32768;

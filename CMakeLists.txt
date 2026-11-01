@@ -1,8 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
 project(recorder_moment CXX)
 
+# El compilador de recursos (windres) mete el icono y la version en el .exe.
+enable_language(RC)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Soporte para Unicode en la API de Windows (para que los titulos y rutas no se corten).
+add_definitions(-DUNICODE -D_UNICODE)
 
 # Genera build/compile_commands.json, que usan VS Code (y otros editores)
 # para que el IntelliSense sepa exactamente con que flags se compila cada
@@ -54,32 +60,65 @@ foreach(component avformat avcodec avutil swscale swresample)
 endforeach()
 
 # ---------------------------------------------------------------------------
-# Ejecutable
+# Dear ImGui (interfaz grafica)
 # ---------------------------------------------------------------------------
+# Se usa solo el core de ImGui mas los backends de Win32 y Direct3D 11 (los
+# otros backends y los ejemplos se borraron para que el repo quede liviano).
+set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
+
 add_executable(recorder
     src/main.cpp
+    src/gui.cpp
     src/dxgi_capture.cpp
     src/video_encoder.cpp
     src/audio_capture.cpp
     src/audio_encoder.cpp
+    src/audio_devices.cpp
     src/clip_buffer.cpp
+    src/config.cpp
     src/recorder.cpp
+
+    resources/recorder.rc
+
+    "${IMGUI_DIR}/imgui.cpp"
+    "${IMGUI_DIR}/imgui_draw.cpp"
+    "${IMGUI_DIR}/imgui_tables.cpp"
+    "${IMGUI_DIR}/imgui_widgets.cpp"
+    "${IMGUI_DIR}/backends/imgui_impl_win32.cpp"
+    "${IMGUI_DIR}/backends/imgui_impl_dx11.cpp"
 )
 
-target_include_directories(recorder PRIVATE "${FFMPEG_INCLUDE_DIR}")
+target_include_directories(recorder PRIVATE
+    "${FFMPEG_INCLUDE_DIR}"
+    "${IMGUI_DIR}"
+    "${IMGUI_DIR}/backends"
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources"
+)
 
-# d3d11/dxgi: la captura.  dxguid/uuid: los IID de COM que usamos con
+# d3d11/dxgi: la captura y el dibujado de la ventana.  d3dcompiler: los shaders
+# que compila el backend de ImGui.  dxguid/uuid: los IID de COM que usamos con
 # __uuidof.  ole32: inicializacion de COM que hace DirectX y WASAPI por
 # debajo.  mmdevapi: los endpoints de audio (WASAPI) que usa audio_capture.
+# propsys: leer el nombre de los dispositivos (audio_devices).  shell32:
+# bandeja del sistema y elegir carpeta.  advapi32: el arranque con Windows
+# (clave "Run" del registro).  dwmapi/comctl32: los usa el backend de ImGui
+# para Win32.
 target_link_libraries(recorder PRIVATE
     ${FFMPEG_LIBS}
     d3d11
     dxgi
     dxguid
+    d3dcompiler
     uuid
     ole32
     mmdevapi
+    propsys
+    shell32
+    advapi32
     user32
+    gdi32
+    dwmapi
+    comctl32
 )
 
 # Linkeamos estaticamente el runtime de MinGW (libstdc++, libgcc, pthread)
@@ -87,6 +126,9 @@ target_link_libraries(recorder PRIVATE
 # dinamico (sus .dll se copian al lado del .exe, ver mas abajo).
 if(MINGW)
     target_link_options(recorder PRIVATE -static)
+    # Subsistema "ventana": al abrir el .exe no aparece una consola atras de la
+    # interfaz. El modo --cli se pega a la consola del padre (ver main.cpp).
+    target_link_options(recorder PRIVATE -mwindows)
 endif()
 
 target_compile_options(recorder PRIVATE -Wall)

@@ -67,7 +67,7 @@ static inline uint8_t linear_to_srgb8(float v) {
 // open / close
 // ---------------------------------------------------------------------------
 bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
-                        AVPixelFormat src_fmt) {
+                        AVPixelFormat src_fmt, int target_height) {
     close();
 
     width_ = width;
@@ -75,6 +75,20 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
     src_fmt_ = src_fmt;
     hdr_tonemap_ = (src_fmt == AV_PIX_FMT_RGBAF16);
     time_base_ = AVRational{1, 1000000};
+
+    // Resolucion de salida: si pidieron una altura menor que la capturada,
+    // bajamos manteniendo la relacion de aspecto (ancho y alto pares, que es lo
+    // que necesitan los codificadores H.264).
+    out_width_ = width_;
+    out_height_ = height_;
+    if (target_height > 0 && target_height < height_) {
+        int h = target_height & ~1;
+        int w = (int)((int64_t)width_ * h / height_) & ~1;
+        if (w >= 2 && h >= 2) {
+            out_width_ = w;
+            out_height_ = h;
+        }
+    }
 
     bool opened = false;
     for (const auto &c : kCandidates) {
@@ -99,8 +113,9 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
 
     // Entrada del conversor de color. Si es HDR primero pasamos por tonemap a
     // BGRA8, asi que el conversor recibe BGRA; si no, recibe el formato tal cual.
+    // La salida es NV12 a la resolucion pedida (escala si hace falta).
     AVPixelFormat sws_src = hdr_tonemap_ ? AV_PIX_FMT_BGRA : src_fmt_;
-    sws_ = sws_getContext(width_, height_, sws_src, width_, height_, AV_PIX_FMT_NV12,
+    sws_ = sws_getContext(width_, height_, sws_src, out_width_, out_height_, AV_PIX_FMT_NV12,
                           SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws_) {
         fprintf(stderr, "[error] no pude crear el conversor de color (sws)\n");
@@ -109,8 +124,8 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
 
     nv12_ = av_frame_alloc();
     nv12_->format = AV_PIX_FMT_NV12;
-    nv12_->width = width_;
-    nv12_->height = height_;
+    nv12_->width = out_width_;
+    nv12_->height = out_height_;
     if (av_frame_get_buffer(nv12_, 32) < 0) {
         fprintf(stderr, "[error] no pude reservar el frame NV12\n");
         return false;
@@ -125,8 +140,11 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
         for (int i = 0; i < 1024; i++) srgb_lut_[i] = linear_to_srgb8((float)i / 1023.0f);
     }
 
+    if (out_width_ != width_ || out_height_ != height_)
+        fprintf(stderr, "[ffmpeg] resolucion de salida: %dx%d (de %dx%d)\n",
+                out_width_, out_height_, width_, height_);
     fprintf(stderr, "[ffmpeg] listo: %dx%d @ %d fps, %d kbps (codificador: %s%s)\n",
-            width_, height_, fps, bitrate_kbps, encoder_name_,
+            out_width_, out_height_, fps, bitrate_kbps, encoder_name_,
             hdr_tonemap_ ? ", HDR->SDR" : "");
     return true;
 }
@@ -138,8 +156,8 @@ bool VideoEncoder::try_open(const Candidate &cand, int fps, int bitrate_kbps) {
     AVCodecContext *ctx = avcodec_alloc_context3(codec);
     if (!ctx) return false;
 
-    ctx->width = width_;
-    ctx->height = height_;
+    ctx->width = out_width_;
+    ctx->height = out_height_;
     ctx->time_base = time_base_;
     ctx->framerate = AVRational{fps, 1};
     ctx->pix_fmt = AV_PIX_FMT_NV12;
