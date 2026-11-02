@@ -70,6 +70,7 @@ add_executable(recorder
     src/main.cpp
     src/gui.cpp
     src/dxgi_capture.cpp
+    src/gpu_convert.cpp
     src/video_encoder.cpp
     src/audio_capture.cpp
     src/audio_encoder.cpp
@@ -95,14 +96,14 @@ target_include_directories(recorder PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources"
 )
 
-# d3d11/dxgi: la captura y el dibujado de la ventana.  d3dcompiler: los shaders
-# que compila el backend de ImGui.  dxguid/uuid: los IID de COM que usamos con
+# d3d11/dxgi: la captura, la conversion a NV12 y la ventana.  d3dcompiler: los shaders
+# de gpu_convert y del backend de ImGui.  dxguid/uuid: los IID de COM que usamos con
 # __uuidof.  ole32: inicializacion de COM que hace DirectX y WASAPI por
 # debajo.  mmdevapi: los endpoints de audio (WASAPI) que usa audio_capture.
 # propsys: leer el nombre de los dispositivos (audio_devices).  shell32:
 # bandeja del sistema y elegir carpeta.  advapi32: el arranque con Windows
 # (clave "Run" del registro).  dwmapi/comctl32: los usa el backend de ImGui
-# para Win32.
+# para Win32.  winmm: pedir el timer de 1 ms mientras graba.
 target_link_libraries(recorder PRIVATE
     ${FFMPEG_LIBS}
     d3d11
@@ -119,6 +120,7 @@ target_link_libraries(recorder PRIVATE
     gdi32
     dwmapi
     comctl32
+    winmm
 )
 
 # Linkeamos estaticamente el runtime de MinGW (libstdc++, libgcc, pthread)

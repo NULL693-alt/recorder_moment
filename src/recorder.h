@@ -30,6 +30,7 @@
 #include "clip_buffer.h"
 #include "config.h"
 #include "dxgi_capture.h"
+#include "gpu_convert.h"
 #include "video_encoder.h"
 
 class Recorder {
@@ -53,6 +54,12 @@ public:
     // Se llama con los mensajes de estado (guardado, errores, etc).
     void set_log_callback(LogFn fn) { log_cb_ = std::move(fn); }
 
+    // Se llama cada vez que termina un pedido de clip: ok = se guardo (msg es
+    // la ruta del archivo) o no (msg dice por que). Puede llamarse desde otro
+    // hilo.
+    using ClipFn = std::function<void(bool ok, const std::string &msg)>;
+    void set_clip_callback(ClipFn fn) { clip_cb_ = std::move(fn); }
+
     bool is_running() const { return running_.load(); }
     long frames() const { return frames_.load(); }
     double buffered_seconds() const { return buffer_seconds_.load(); }
@@ -66,6 +73,7 @@ public:
 
 private:
     bool ensure_capture();
+    bool ensure_converter();
     bool start_audio();
     void pump_audio();
     void handle_save();
@@ -76,6 +84,9 @@ private:
     void log(const std::string &msg);
 
     DxgiCapture capture_;
+    GpuConverter converter_;
+    int converter_generation_ = 0; // generation() de la captura sobre la que se armo
+    int cursor_version_ = -1;      // forma del cursor que ya tiene converter_
     VideoEncoder encoder_;
     AudioCapture audio_capture_;
     AudioEncoder audio_encoder_;
@@ -101,4 +112,5 @@ private:
     std::atomic<double> buffer_seconds_{0.0};
 
     LogFn log_cb_;
+    ClipFn clip_cb_;
 };

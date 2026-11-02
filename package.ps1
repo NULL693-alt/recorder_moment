@@ -24,6 +24,12 @@ $distRoot = Join-Path $root "dist"
 $pkg = Join-Path $distRoot "recorder_moment"
 $zip = Join-Path $distRoot "recorder_moment.zip"
 
+# La copia de dist\ es la que se usa (y la que abre Windows al iniciar): sus
+# ajustes se conservan al reempaquetar, pero no van dentro del .zip.
+$cfgFile = Join-Path $pkg "recorder_config.ini"
+$savedCfg = $null
+if (Test-Path $cfgFile) { $savedCfg = [IO.File]::ReadAllBytes($cfgFile) }
+
 # Limpia el empaquetado anterior.
 if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
 if (Test-Path $zip) { Remove-Item -Force $zip }
@@ -66,8 +72,11 @@ del programa), con nombres como clip_20261101_153000.mp4.
 No hace falta instalar nada: todo lo necesario esta en esta carpeta.
 "@ | Set-Content -Encoding UTF8 (Join-Path $pkg "LEEME.txt")
 
-# El zip.
+# El zip (sin ajustes personales: quien lo reciba arranca con los de fabrica).
 Compress-Archive -Path (Join-Path $pkg "*") -DestinationPath $zip
+
+# Devolvemos los ajustes a la carpeta portable.
+if ($savedCfg) { [IO.File]::WriteAllBytes($cfgFile, $savedCfg) }
 
 Write-Host ""
 Write-Host "Listo:"

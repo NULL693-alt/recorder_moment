@@ -34,6 +34,7 @@
 #include <dxgi1_5.h>
 
 #include <cstdint>
+#include <vector>
 
 // Formato de pixel que entrega la captura, ya traducido a algo entendible.
 enum class CaptureFormat {
@@ -41,6 +42,18 @@ enum class CaptureFormat {
     RGBA,       // 8 bits por canal (orden distinto)
     HDR_FLOAT,  // R16G16B16A16_FLOAT: monitor en HDR (scRGB, lineal)
     Unknown,
+};
+
+// El cursor del mouse. Desktop Duplication NO lo dibuja en la imagen: avisa
+// donde esta y que forma tiene, y lo tenemos que dibujar nosotros.
+struct CursorInfo {
+    bool visible = false;
+    int x = 0, y = 0;            // esquina superior izquierda, en pixeles del monitor
+    int width = 0, height = 0;
+    // BGRA con alpha normal. Los pixeles que invierten lo que hay debajo (el
+    // cursor de texto, por ejemplo) van con alpha = 1 (ver gpu_convert).
+    std::vector<uint8_t> bgra;
+    int version = 0;             // sube cada vez que cambia la forma
 };
 
 class DxgiCapture {
@@ -68,10 +81,9 @@ public:
     // Pide un frame nuevo, esperando hasta timeout_ms milisegundos.
     Result acquire(int timeout_ms);
 
-    // Vuelve a dejar visible (data()/row_pitch()) el ultimo frame capturado,
-    // aunque la pantalla no haya cambiado: sirve para repetirlo y mantener los
-    // FPS constantes. Devuelve false si todavia no hay ningun frame.
-    bool remap_last();
+    // true si frame_texture() ya tiene algun frame (se puede repetir el ultimo
+    // aunque la pantalla no haya cambiado, para mantener los FPS constantes).
+    bool has_frame() const { return has_frame_; }
 
     // Imprime por stderr la lista de monitores detectados.
     static void list_monitors();
@@ -85,15 +97,23 @@ public:
     float sdr_white_scale() const { return sdr_white_scale_; }
     int monitor_index() const { return monitor_index_; }
 
-    // Validos solo despues de acquire() == Frame, hasta el siguiente acquire().
-    const uint8_t *data() const { return reinterpret_cast<const uint8_t *>(mapped_.pData); }
-    int row_pitch() const { return static_cast<int>(mapped_.RowPitch); }
+    // El ultimo frame capturado, en la GPU (se puede leer desde un shader).
+    // Cambia en cada init(): generation() sube cada vez, asi quien lo use sabe
+    // que tiene que volver a armarse sobre el dispositivo nuevo.
+    ID3D11Device *device() const { return device_; }
+    ID3D11DeviceContext *context() const { return device_ctx_; }
+    ID3D11Texture2D *frame_texture() const { return frame_tex_; }
+    int generation() const { return generation_; }
+
+    // Posicion y forma del cursor (se actualizan en cada acquire()).
+    const CursorInfo &cursor() const { return cursor_; }
 
 private:
     // Crea la duplicacion probando DuplicateOutput1 (HDR) y, si no esta
     // disponible, DuplicateOutput (SDR clasico).
     HRESULT create_duplication();
     bool classify_format(DXGI_FORMAT f);
+    void update_cursor_shape(UINT buffer_size);
 
     IDXGIFactory1 *factory_ = nullptr;
     IDXGIAdapter1 *adapter_ = nullptr;
@@ -103,11 +123,11 @@ private:
     IDXGIOutputDuplication *duplication_ = nullptr;
     ID3D11Device *device_ = nullptr;
     ID3D11DeviceContext *device_ctx_ = nullptr;
-    ID3D11Texture2D *staging_ = nullptr;
-
-    D3D11_MAPPED_SUBRESOURCE mapped_{};
-    bool mapped_ok_ = false;
-    bool has_frame_ = false; // staging_ ya tiene un frame copiado
+    ID3D11Texture2D *frame_tex_ = nullptr;
+    bool has_frame_ = false; // frame_tex_ ya tiene un frame copiado
+    int generation_ = 0;
+    CursorInfo cursor_;
+    std::vector<uint8_t> shape_buf_;
 
     DXGI_FORMAT dxgi_format_ = DXGI_FORMAT_B8G8R8A8_UNORM;
     CaptureFormat format_ = CaptureFormat::BGRA;

@@ -1,123 +1,89 @@
 #include "video_encoder.h"
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 }
 
 // ---------------------------------------------------------------------------
 // Codificadores que probamos, en orden. El primero que abra es el que se usa.
-// h264_qsv es el que corresponde a las GPU Intel (Intel Arc incluida).
+// Los *_qsv son los de las GPU Intel (Intel Arc incluida).
 // ---------------------------------------------------------------------------
-static const struct {
+struct CandidateDef {
     const char *name;
     bool is_qsv;
     const char *preset;
-} kCandidates[] = {
+};
+
+static const CandidateDef kH264[] = {
     {"h264_qsv", true, "veryfast"},
     {"h264_nvenc", false, nullptr},
     {"h264_amf", false, nullptr},
     {"libx264", false, "veryfast"},
 };
 
-// ---------------------------------------------------------------------------
-// HDR: conversion de half-float (IEEE 754 media precision) a float normal.
-// ---------------------------------------------------------------------------
-static inline float half_to_float(uint16_t h) {
-    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
-    uint32_t exp = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x3FF;
-    uint32_t f;
-    if (exp == 0) {
-        if (mant == 0) {
-            f = sign;
-        } else {
-            exp = 127 - 15 + 1;
-            while (!(mant & 0x400)) {
-                mant <<= 1;
-                exp--;
-            }
-            mant &= 0x3FF;
-            f = sign | (exp << 23) | (mant << 13);
-        }
-    } else if (exp == 31) {
-        f = sign | 0x7F800000u | (mant << 13);
-    } else {
-        f = sign | ((exp - 15 + 127) << 23) | (mant << 13);
-    }
-    float out;
-    memcpy(&out, &f, 4);
-    return out;
-}
+// AV1 solo por hardware (Intel Arc, NVIDIA RTX 40+, AMD RX 7000+): por CPU es
+// demasiado lento para grabar en vivo. Si no hay ninguno, se usa H.264.
+static const CandidateDef kAV1[] = {
+    {"av1_qsv", true, "veryfast"},
+    {"av1_nvenc", false, nullptr},
+    {"av1_amf", false, nullptr},
+};
 
-// Conversion de un valor lineal [0..1] a 8 bits con la curva sRGB.
-static inline uint8_t linear_to_srgb8(float v) {
-    if (!(v > 0.0f)) return 0; // tambien descarta NaN
-    if (v >= 1.0f) return 255;
-    float s = (v <= 0.0031308f) ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
-    int i = (int)(s * 255.0f + 0.5f);
-    return (uint8_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
-}
+const char *video_codec_name(VideoCodec c) { return c == VideoCodec::AV1 ? "AV1" : "H.264"; }
 
 // Cada cuanto se fuerza un keyframe, en tiempo (no en frames): con la pantalla
 // casi quieta llegan pocos frames y un GOP contado en frames podria dejar los
 // keyframes a decenas de segundos.
 static const int64_t kKeyframeIntervalUs = 2000000;
 
-// HDR -> SDR de un canal scRGB lineal. Primero se divide por el blanco SDR, asi
-// lo que en el monitor se ve como contenido SDR queda igual que en SDR. Lo que
-// pasa de un 75% (brillos HDR) se comprime de a poco hacia 1.0 en vez de
-// recortarse de golpe.
-static inline float tonemap_channel(float v, float white) {
-    float x = v / white;
-    if (!(x > 0.0f)) return 0.0f;
-    const float knee = 0.75f;
-    if (x <= knee) return x;
-    return knee + (1.0f - knee) * (1.0f - expf(-(x - knee) / (1.0f - knee)));
-}
-
 // ---------------------------------------------------------------------------
 // open / close
 // ---------------------------------------------------------------------------
-bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
-                        AVPixelFormat src_fmt, int target_height, float sdr_white_scale) {
+bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps, int target_height,
+                        VideoCodec codec) {
     close();
     last_key_us_ = -1;
-
-    width_ = width;
-    height_ = height;
-    src_fmt_ = src_fmt;
-    hdr_tonemap_ = (src_fmt == AV_PIX_FMT_RGBAF16);
     time_base_ = AVRational{1, 1000000};
 
     // Resolucion de salida: si pidieron una altura menor que la capturada,
     // bajamos manteniendo la relacion de aspecto (ancho y alto pares, que es lo
     // que necesitan los codificadores H.264).
-    out_width_ = width_;
-    out_height_ = height_;
-    if (target_height > 0 && target_height < height_) {
+    out_width_ = width & ~1;
+    out_height_ = height & ~1;
+    if (target_height > 0 && target_height < height) {
         int h = target_height & ~1;
-        int w = (int)((int64_t)width_ * h / height_) & ~1;
+        int w = (int)((int64_t)width * h / height) & ~1;
         if (w >= 2 && h >= 2) {
             out_width_ = w;
             out_height_ = h;
         }
     }
 
-    bool opened = false;
-    for (const auto &c : kCandidates) {
-        Candidate cand{c.name, c.is_qsv, c.preset};
-        if (try_open(cand, fps, bitrate_kbps)) {
-            opened = true;
-            break;
+    auto try_list = [&](const CandidateDef *list, size_t n) {
+        for (size_t i = 0; i < n; i++) {
+            Candidate cand{list[i].name, list[i].is_qsv, list[i].preset};
+            if (try_open(cand, fps, bitrate_kbps)) return true;
         }
+        return false;
+    };
+
+    bool opened = false;
+    codec_ = VideoCodec::H264;
+    if (codec == VideoCodec::AV1) {
+        opened = try_list(kAV1, sizeof(kAV1) / sizeof(kAV1[0]));
+        if (opened)
+            codec_ = VideoCodec::AV1;
+        else
+            fprintf(stderr, "[ffmpeg] esta GPU no codifica AV1; se usa H.264\n");
     }
+    if (!opened) opened = try_list(kH264, sizeof(kH264) / sizeof(kH264[0]));
     if (!opened) {
-        fprintf(stderr, "[error] no pude abrir ningun codificador h264 "
+        fprintf(stderr, "[error] no pude abrir ningun codificador de video "
                         "(qsv/nvenc/amf/libx264)\n");
         return false;
     }
@@ -126,17 +92,6 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
     codecpar_ = avcodec_parameters_alloc();
     if (!codecpar_ || avcodec_parameters_from_context(codecpar_, codec_ctx_) < 0) {
         fprintf(stderr, "[error] no pude copiar los parametros del codificador\n");
-        return false;
-    }
-
-    // Entrada del conversor de color. Si es HDR primero pasamos por tonemap a
-    // BGRA8, asi que el conversor recibe BGRA; si no, recibe el formato tal cual.
-    // La salida es NV12 a la resolucion pedida (escala si hace falta).
-    AVPixelFormat sws_src = hdr_tonemap_ ? AV_PIX_FMT_BGRA : src_fmt_;
-    sws_ = sws_getContext(width_, height_, sws_src, out_width_, out_height_, AV_PIX_FMT_NV12,
-                          SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!sws_) {
-        fprintf(stderr, "[error] no pude crear el conversor de color (sws)\n");
         return false;
     }
 
@@ -151,23 +106,11 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
 
     pkt_ = av_packet_alloc();
 
-    if (hdr_tonemap_) {
-        tonemap_buf_.resize((size_t)width_ * height_ * 4);
-        // Tabla con el resultado para cada uno de los 65536 half-float posibles:
-        // por pixel queda una sola lectura de tabla (sin conversiones ni powf).
-        float white = sdr_white_scale >= 1.0f ? sdr_white_scale : 1.0f;
-        tonemap_lut_.resize(65536);
-        for (int i = 0; i < 65536; i++)
-            tonemap_lut_[i] = linear_to_srgb8(tonemap_channel(half_to_float((uint16_t)i), white));
-        fprintf(stderr, "[ffmpeg] HDR: blanco SDR = %.0f nits\n", white * 80.0f);
-    }
-
-    if (out_width_ != width_ || out_height_ != height_)
-        fprintf(stderr, "[ffmpeg] resolucion de salida: %dx%d (de %dx%d)\n",
-                out_width_, out_height_, width_, height_);
-    fprintf(stderr, "[ffmpeg] listo: %dx%d @ %d fps, %d kbps (codificador: %s%s)\n",
-            out_width_, out_height_, fps, bitrate_kbps, encoder_name_,
-            hdr_tonemap_ ? ", HDR->SDR" : "");
+    if (out_width_ != width || out_height_ != height)
+        fprintf(stderr, "[ffmpeg] resolucion de salida: %dx%d (de %dx%d)\n", out_width_,
+                out_height_, width, height);
+    fprintf(stderr, "[ffmpeg] listo: %s %dx%d @ %d fps, %d kbps (codificador: %s)\n",
+            video_codec_name(codec_), out_width_, out_height_, fps, bitrate_kbps, encoder_name_);
     return true;
 }
 
@@ -189,6 +132,13 @@ bool VideoEncoder::try_open(const Candidate &cand, int fps, int bitrate_kbps) {
     ctx->max_b_frames = 0;
     ctx->bit_rate = (int64_t)bitrate_kbps * 1000;
     if (strcmp(cand.name, "libx264") == 0) ctx->rc_buffer_size = bitrate_kbps * 2000;
+
+    // El NV12 que arma gpu_convert es BT.709 rango limitado: lo anotamos en el
+    // stream para que los reproductores muestren los colores bien.
+    ctx->color_range = AVCOL_RANGE_MPEG;
+    ctx->colorspace = AVCOL_SPC_BT709;
+    ctx->color_primaries = AVCOL_PRI_BT709;
+    ctx->color_trc = AVCOL_TRC_BT709;
 
     if (cand.preset) av_opt_set(ctx->priv_data, "preset", cand.preset, 0);
 
@@ -223,34 +173,12 @@ bool VideoEncoder::try_open(const Candidate &cand, int fps, int bitrate_kbps) {
 void VideoEncoder::close() {
     if (pkt_) av_packet_free(&pkt_);
     if (nv12_) av_frame_free(&nv12_);
-    if (sws_) { sws_freeContext(sws_); sws_ = nullptr; }
     if (codecpar_) avcodec_parameters_free(&codecpar_);
     if (codec_ctx_) avcodec_free_context(&codec_ctx_);
     encoder_name_ = nullptr;
-    tonemap_buf_.clear();
-    tonemap_lut_.clear();
 }
 
 VideoEncoder::~VideoEncoder() { close(); }
-
-// ---------------------------------------------------------------------------
-// Tonemap HDR (scRGB float lineal) -> BGRA8 (sRGB)
-// ---------------------------------------------------------------------------
-void VideoEncoder::tonemap_to_bgra(const uint8_t *data, int pitch) {
-    for (int y = 0; y < height_; y++) {
-        const uint16_t *src = reinterpret_cast<const uint16_t *>(data + (size_t)y * pitch);
-        uint8_t *dst = tonemap_buf_.data() + (size_t)y * width_ * 4;
-        const uint8_t *lut = tonemap_lut_.data();
-        for (int x = 0; x < width_; x++) {
-            dst[0] = lut[src[2]]; // BGRA
-            dst[1] = lut[src[1]];
-            dst[2] = lut[src[0]];
-            dst[3] = 255;
-            src += 4;
-            dst += 4;
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // encode
@@ -262,22 +190,20 @@ void VideoEncoder::drain(const PacketFn &on_packet) {
     }
 }
 
-bool VideoEncoder::encode(const uint8_t *data, int pitch, int64_t pts_us,
-                          const PacketFn &on_packet) {
+bool VideoEncoder::encode_nv12(const uint8_t *y, int y_pitch, const uint8_t *uv, int uv_pitch,
+                               int64_t pts_us, const PacketFn &on_packet) {
     if (!codec_ctx_) return false;
 
-    const uint8_t *src[1];
-    int stride[1];
-    if (hdr_tonemap_) {
-        tonemap_to_bgra(data, pitch);
-        src[0] = tonemap_buf_.data();
-        stride[0] = width_ * 4;
-    } else {
-        src[0] = data;
-        stride[0] = pitch;
+    // El codificador puede seguir usando el frame anterior: si es asi, esto
+    // nos da un buffer nuevo en vez de pisarle los datos.
+    if (av_frame_make_writable(nv12_) < 0) {
+        fprintf(stderr, "[error] no pude preparar el frame NV12\n");
+        return false;
     }
-
-    sws_scale(sws_, src, stride, 0, height_, nv12_->data, nv12_->linesize);
+    av_image_copy_plane(nv12_->data[0], nv12_->linesize[0], y, y_pitch, out_width_,
+                        out_height_);
+    av_image_copy_plane(nv12_->data[1], nv12_->linesize[1], uv, uv_pitch, out_width_,
+                        out_height_ / 2);
     nv12_->pts = pts_us;
 
     // Keyframe por tiempo (el codificador igual pone los suyos por GOP).

@@ -61,11 +61,14 @@ void config_load(AppConfig &cfg, const std::string &path) {
         else if (key == "audio_kbps") cfg.audio_kbps = atoi(val.c_str());
         else if (key == "mic_volume") cfg.mic_volume = atoi(val.c_str());
         else if (key == "out_height") cfg.out_height = atoi(val.c_str());
+        else if (key == "video_codec") cfg.video_codec = (val == "av1") ? "av1" : "h264";
         else if (key == "audio_enabled") cfg.audio_enabled = (val == "1" || val == "true");
         else if (key == "mic_enabled") cfg.mic_enabled = (val == "1" || val == "true");
         else if (key == "output_device") cfg.output_device = val;
         else if (key == "mic_device") cfg.mic_device = val;
         else if (key == "minimize_to_tray") cfg.minimize_to_tray = (val == "1" || val == "true");
+        else if (key == "clip_sound") cfg.clip_sound = (val == "1" || val == "true");
+        else if (key == "record_cursor") cfg.record_cursor = (val == "1" || val == "true");
     }
 
     // Valores sanitizados por si el archivo quedo a mano rara.
@@ -93,9 +96,12 @@ void config_save(const AppConfig &cfg, const std::string &path) {
     out << "audio_kbps=" << cfg.audio_kbps << "\n";
     out << "mic_volume=" << cfg.mic_volume << "\n";
     out << "out_height=" << cfg.out_height << "\n";
+    out << "video_codec=" << cfg.video_codec << "\n";
     out << "audio_enabled=" << (cfg.audio_enabled ? 1 : 0) << "\n";
     out << "mic_enabled=" << (cfg.mic_enabled ? 1 : 0) << "\n";
     out << "output_device=" << cfg.output_device << "\n";
     out << "mic_device=" << cfg.mic_device << "\n";
     out << "minimize_to_tray=" << (cfg.minimize_to_tray ? 1 : 0) << "\n";
+    out << "clip_sound=" << (cfg.clip_sound ? 1 : 0) << "\n";
+    out << "record_cursor=" << (cfg.record_cursor ? 1 : 0) << "\n";
 }

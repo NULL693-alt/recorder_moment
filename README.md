@@ -24,26 +24,38 @@ Lo que cambio al migrar:
 | `h264_vaapi` (GPU Intel)             | `h264_qsv` / `h264_nvenc` / `h264_amf` / `libx264` |
 | `signal(SIGINT)` para cortar         | `SetConsoleCtrlHandler` (Ctrl+C)               |
 
-El codificador se elige solo: prueba `h264_qsv` (Intel Quick Sync), despues
-`h264_nvenc` (NVIDIA), despues `h264_amf` (AMD) y, si ninguno de esos anda,
-cae a `libx264` (CPU).
+Se puede elegir el **codec**: **H.264** (se reproduce en todos lados) o
+**AV1** (mejor calidad por Mbps: con un 30-40% menos de bitrate se ve igual).
+El codificador se elige solo segun la GPU:
+
+- H.264: `h264_qsv` (Intel Quick Sync), `h264_nvenc` (NVIDIA), `h264_amf`
+  (AMD) y, si ninguno anda, `libx264` (CPU).
+- AV1: `av1_qsv` (Intel Arc), `av1_nvenc` (NVIDIA RTX 40+), `av1_amf` (AMD
+  RX 7000+). Si la GPU no codifica AV1, se graba en H.264 y se avisa.
 
 ## Como funciona
 
 Mientras corre, el programa:
 
-1. Captura cada frame con **DXGI Desktop Duplication** (`dxgi_capture.*`).
-2. Lo codifica con la GPU usando **FFmpeg** (`video_encoder.*`). Si el monitor
-   esta en **HDR** pide el frame en formato scRGB (`R16G16B16A16_FLOAT`) y lo
-   convierte a SDR 8 bits con una curva sRGB.
-3. En paralelo captura el **audio** con **WASAPI** (`audio_capture.*`): el
+1. Captura cada frame con **DXGI Desktop Duplication** (`dxgi_capture.*`), a
+   **FPS constantes**: si la pantalla no cambia, repite el ultimo frame. Como
+   Desktop Duplication no incluye el **cursor**, guarda su forma y posicion
+   para dibujarlo aparte.
+2. Lo convierte a NV12 **en la GPU** con dos shaders (`gpu_convert.*`): color
+   BT.709, escalado a la resolucion de salida, el cursor encima y, si el
+   monitor esta en **HDR** (scRGB), el paso a SDR usando el brillo del
+   contenido SDR de Windows. A la CPU solo baja el NV12 ya listo, por varias
+   texturas que se turnan para no frenar a la GPU.
+3. Lo codifica con la GPU usando **FFmpeg** (`video_encoder.*`), con un
+   keyframe cada 2 segundos.
+4. En paralelo captura el **audio** con **WASAPI** (`audio_capture.*`): el
    sonido del sistema (loopback, o sea todo lo que suena) y el microfono, los
    mezcla en una sola pista (48 kHz, estereo) y la codifica en **AAC**
    (`audio_encoder.*`).
-4. Guarda los paquetes H.264 y AAC ya comprimidos en un **buffer circular**
+5. Guarda los paquetes de video y AAC ya comprimidos en un **buffer circular**
    (`clip_buffer.*`) con dos colas, que se podan solas para no crecer mas alla
    de la ventana pedida.
-5. Cuando aprietas **F9**, busca el keyframe mas cercano al inicio de la ventana
+6. Cuando aprietas **F9**, busca el keyframe mas cercano al inicio de la ventana
    y escribe los ultimos N segundos de video y audio sincronizados en un `.mp4`
    nuevo.
 
@@ -58,7 +70,8 @@ src/
   config.*          ajustes persistentes (recorder_config.ini)
   audio_devices.*   enumerar microfonos y dispositivos de salida
   dxgi_capture.*    captura de pantalla (DirectX 11)
-  video_encoder.*   codificacion y conversion de color (FFmpeg)
+  gpu_convert.*     conversion a NV12, escalado, HDR y cursor (shaders D3D11)
+  video_encoder.*   codificacion H.264 / AV1 (FFmpeg)
   audio_capture.*   captura de audio (WASAPI: sistema + microfono)
   audio_encoder.*   codificacion de audio (AAC, FFmpeg)
   clip_buffer.*     buffer circular de los ultimos N segundos
@@ -126,18 +139,25 @@ Se abre una ventana con:
   elegirla).
 - **Monitor**, **FPS**, **Bitrate de video** y **Duracion del buffer**
   (segundos).
+- **Codec de video**: *H.264* o *AV1* (ver arriba). Para ver los clips AV1
+  con las apps de Windows hace falta la "Extension de video AV1" (gratis en
+  Microsoft Store); VLC, Chrome y Discord ya los reproducen.
 - **Resolucion de salida**: *Nativa* (la del monitor) o una altura menor
   (2160p/1440p/1080p/720p/480p/360p) para que los clips pesen menos.
+- **Grabar el cursor del mouse**: si se desmarca, los clips salen sin cursor.
 - **Grabar audio** y **Grabar microfono**, mas dos desplegables para elegir el
   dispositivo de salida y el **microfono** (con *Refrescar dispositivos*),
   un **volumen del microfono** (0–200%) y el **bitrate de audio** (64–320
   kbps).
 - **Iniciar** / **Detener** y **Guardar clip (F9)**, con el estado en vivo
-  (frames capturados y cuanto llena el buffer).
+  (frames capturados y cuanto llena el buffer). Al guardar aparece un cartel
+  "Clip guardado" arriba a la derecha (no sale en los clips) y suena un tono
+  (se puede apagar con **Sonido al guardar un clip**).
 - **Minimizar a la bandeja al cerrar**: si esta marcado, cerrar la ventana no
   sale del programa, lo deja en la **bandeja del sistema** (icono junto al
   reloj). Desde ahi, click derecho para *Mostrar*, *Iniciar/Detener*,
-  *Guardar clip*, *Abrir carpeta de clips* o *Salir*.
+  *Guardar clip*, *Abrir carpeta de clips*, *Mostrar el ultimo clip* o
+  *Salir*. Escondida en la bandeja, la ventana no gasta CPU ni GPU.
 - **Iniciar con Windows**: si esta marcado, el programa se abre solo al
   encender la PC. Para que ademas arranque escondido y grabando, marca tambien
   *Minimizar a la bandeja al cerrar*. Se puede desactivar destildando la

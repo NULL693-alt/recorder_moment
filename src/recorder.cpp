@@ -1,5 +1,7 @@
 #include "recorder.h"
 
+#include <timeapi.h> // timeBeginPeriod
+
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -79,6 +81,22 @@ bool Recorder::ensure_capture() {
         }
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// La conversion a NV12 vive en el dispositivo D3D11 de la captura: se arma la
+// primera vez y cada vez que la captura se reconecta (dispositivo nuevo).
+// ---------------------------------------------------------------------------
+bool Recorder::ensure_converter() {
+    if (converter_generation_ == capture_.generation() && converter_.is_open()) return true;
+    float hdr_white = capture_.is_hdr() ? capture_.sdr_white_scale() : 0.0f;
+    if (!converter_.open(capture_.device(), capture_.context(), capture_.frame_texture(),
+                         capture_.width(), capture_.height(), encoder_.out_width(),
+                         encoder_.out_height(), hdr_white))
+        return false;
+    converter_generation_ = capture_.generation();
+    cursor_version_ = -1; // la forma del cursor hay que volver a subirla
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,12 +191,18 @@ std::string Recorder::make_clip_path() const {
 // Guardar el clip
 // ---------------------------------------------------------------------------
 void Recorder::handle_save() {
+    // Avisa a la interfaz (notificacion + sonido) y deja el mensaje en el log.
+    auto fail = [this](const std::string &why) {
+        log("[clip] " + why);
+        if (clip_cb_) clip_cb_(false, why);
+    };
+
     if (!encoder_.is_open() || buffer_.count() == 0) {
-        log("[clip] todavia no hay video capturado para guardar");
+        fail("todavia no hay video capturado para guardar");
         return;
     }
     if (saving_.load()) {
-        log("[clip] todavia se esta guardando el clip anterior; proba de nuevo en un momento");
+        fail("todavia se esta guardando el clip anterior; proba de nuevo en un momento");
         return;
     }
     join_save(); // el hilo del clip anterior ya termino: lo juntamos
@@ -188,7 +212,7 @@ void Recorder::handle_save() {
     AVCodecParameters *vpar = avcodec_parameters_alloc();
     if (!vpar || avcodec_parameters_copy(vpar, encoder_.codecpar()) < 0) {
         avcodec_parameters_free(&vpar);
-        log("[clip] no se pudo guardar el clip");
+        fail("no se pudo guardar el clip");
         return;
     }
     AVCodecParameters *apar = nullptr;
@@ -213,7 +237,13 @@ void Recorder::handle_save() {
         snap.reset();
         avcodec_parameters_free(&vpar);
         if (apar) avcodec_parameters_free(&apar);
-        log(ok ? "[clip] listo: " + path : std::string("[clip] no se pudo guardar el clip"));
+        if (ok) {
+            log("[clip] listo: " + path);
+            if (clip_cb_) clip_cb_(true, path);
+        } else {
+            log("[clip] no se pudo guardar el clip (revisa que la carpeta exista)");
+            if (clip_cb_) clip_cb_(false, "no se pudo guardar el clip en " + path);
+        }
         saving_.store(false);
     });
 }
@@ -251,8 +281,27 @@ bool Recorder::run() {
         return false;
     }
 
+    // El codificador y la conversion en la GPU se arman antes de empezar:
+    // abrir Quick Sync y compilar los shaders tarda unos cientos de ms, y si se
+    // hiciera con el primer frame el clip arrancaria con un salto.
+    const VideoCodec want = cfg_.video_codec == "av1" ? VideoCodec::AV1 : VideoCodec::H264;
+    if (!encoder_.open(capture_.width(), capture_.height(), cfg_.fps, cfg_.kbps,
+                       cfg_.out_height, want) ||
+        !ensure_converter()) {
+        log("No se pudo preparar la codificacion de video.");
+        return false;
+    }
+    if (want == VideoCodec::AV1 && encoder_.codec() != VideoCodec::AV1)
+        log("[video] esta GPU no puede codificar AV1: los clips se graban en H.264");
+    log(std::string("[video] codec: ") + video_codec_name(encoder_.codec()) + " (" +
+        encoder_.name() + ")");
+
     log("Capturando el monitor #" + std::to_string(cfg_.monitor) +
         (audio_enabled_ ? " con audio." : " sin audio."));
+
+    // Windows despierta los hilos de a ~15,6 ms: con eso un frame que tenia que
+    // salir a los 33 ms sale a los 47 (tirones). Mientras grabamos pedimos 1 ms.
+    timeBeginPeriod(1);
 
     start_audio();
     running_.store(true);
@@ -298,7 +347,7 @@ bool Recorder::run() {
         // (aunque se haya salteado por el limite de FPS, asi tampoco queda
         // afuera el ultimo cambio). Un frame repetido pesa casi nada.
         bool fresh = (r == DxgiCapture::Result::Frame);
-        bool repeat = !fresh && due && encoder_.is_open() && capture_.remap_last();
+        bool repeat = !fresh && due && encoder_.is_open() && capture_.has_frame();
 
         if ((fresh && due) || repeat) {
             // El proximo toca un intervalo despues del anterior, pero nunca a
@@ -309,32 +358,35 @@ bool Recorder::run() {
             if (next_frame_us_ < t + frame_interval_us * 3 / 4)
                 next_frame_us_ = t + frame_interval_us * 3 / 4;
 
-            // El codificador se arma con el primer frame, cuando ya sabemos el
-            // tamano real del monitor y que formato entrega.
-            if (!encoder_.is_open()) {
-                AVPixelFormat fmt;
-                switch (capture_.format()) {
-                    case CaptureFormat::BGRA: fmt = AV_PIX_FMT_BGRA; break;
-                    case CaptureFormat::RGBA: fmt = AV_PIX_FMT_RGBA; break;
-                    case CaptureFormat::HDR_FLOAT: fmt = AV_PIX_FMT_RGBAF16; break;
-                    default: fmt = AV_PIX_FMT_NONE; break;
-                }
-                if (fmt == AV_PIX_FMT_NONE ||
-                    !encoder_.open(capture_.width(), capture_.height(), cfg_.fps, cfg_.kbps,
-                                   fmt, cfg_.out_height, capture_.sdr_white_scale())) {
-                    failed_.store(true);
-                    break;
-                }
+            // Si la captura se reconecto (dispositivo D3D11 nuevo), la
+            // conversion se rearma sobre el.
+            if (!ensure_converter()) {
+                failed_.store(true);
+                break;
             }
 
             int64_t pts = t - start_time_us_;
 
-            bool ok = encoder_.encode(capture_.data(), capture_.row_pitch(), pts,
-                                      [this](const AVPacket *pkt) {
-                                          buffer_.push_video(
-                                              pkt, pkt->pts,
-                                              (pkt->flags & AV_PKT_FLAG_KEY) != 0);
-                                      });
+            // Cursor: forma nueva (si cambio) y posicion de este momento.
+            const CursorInfo &cur = capture_.cursor();
+            if (cursor_version_ != cur.version) {
+                converter_.set_cursor_shape(cur.bgra.data(), cur.width, cur.height);
+                cursor_version_ = cur.version;
+            }
+            converter_.set_cursor_pos(cur.x, cur.y, cur.visible && cfg_.record_cursor);
+
+            // La GPU convierte este frame; el que sale para codificar es el de
+            // un par de frames atras (ya listo), con su propio pts.
+            bool ok = converter_.submit(
+                pts, [this](const uint8_t *y, int y_pitch, const uint8_t *uv, int uv_pitch,
+                            int64_t frame_pts) {
+                    return encoder_.encode_nv12(y, y_pitch, uv, uv_pitch, frame_pts,
+                                                [this](const AVPacket *pkt) {
+                                                    buffer_.push_video(
+                                                        pkt, pkt->pts,
+                                                        (pkt->flags & AV_PKT_FLAG_KEY) != 0);
+                                                });
+                });
             if (!ok) {
                 failed_.store(true);
                 break;
@@ -358,6 +410,7 @@ bool Recorder::run() {
     Recorder::request_stop();
     if (hotkey_.joinable()) hotkey_.join();
     join_save(); // si quedo un clip escribiendose, lo dejamos terminar
+    timeEndPeriod(1);
     audio_capture_.close();
     audio_encoder_.close();
 

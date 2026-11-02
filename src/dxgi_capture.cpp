@@ -75,7 +75,7 @@ void DxgiCapture::list_monitors() {
 // Liberar recursos
 // ---------------------------------------------------------------------------
 void DxgiCapture::release() {
-    if (staging_) { staging_->Release(); staging_ = nullptr; }
+    if (frame_tex_) { frame_tex_->Release(); frame_tex_ = nullptr; }
     if (duplication_) { duplication_->Release(); duplication_ = nullptr; }
     if (output5_) { output5_->Release(); output5_ = nullptr; }
     if (output1_) { output1_->Release(); output1_ = nullptr; }
@@ -84,7 +84,6 @@ void DxgiCapture::release() {
     if (factory_) { factory_->Release(); factory_ = nullptr; }
     if (device_ctx_) { device_ctx_->Release(); device_ctx_ = nullptr; }
     if (device_) { device_->Release(); device_ = nullptr; }
-    mapped_ok_ = false;
     has_frame_ = false;
 }
 
@@ -237,8 +236,8 @@ bool DxgiCapture::init(int monitor_index, bool first_time) {
         sdr_white_scale_ = s >= 1.0f ? s : 2.5f;
     }
 
-    // Textura "staging": copia del frame en un formato que la CPU si puede
-    // leer (D3D11_USAGE_STAGING + CPU_ACCESS_READ).
+    // Textura donde queda el ultimo frame, en la GPU. Se puede leer desde un
+    // shader (la conversion a NV12 se hace ahi, ver gpu_convert.*).
     D3D11_TEXTURE2D_DESC tex_desc{};
     tex_desc.Width = (UINT)width_;
     tex_desc.Height = (UINT)height_;
@@ -246,17 +245,19 @@ bool DxgiCapture::init(int monitor_index, bool first_time) {
     tex_desc.ArraySize = 1;
     tex_desc.Format = dxgi_format_;
     tex_desc.SampleDesc.Count = 1;
-    tex_desc.Usage = D3D11_USAGE_STAGING;
-    tex_desc.BindFlags = 0;
-    tex_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    tex_desc.Usage = D3D11_USAGE_DEFAULT;
+    tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    tex_desc.CPUAccessFlags = 0;
     tex_desc.MiscFlags = 0;
 
-    hr = device_->CreateTexture2D(&tex_desc, nullptr, &staging_);
+    hr = device_->CreateTexture2D(&tex_desc, nullptr, &frame_tex_);
     if (FAILED(hr)) {
-        fprintf(stderr, "[error] no pude crear la textura de lectura (0x%08lx)\n",
+        fprintf(stderr, "[error] no pude crear la textura del frame (0x%08lx)\n",
                 (unsigned long)hr);
         return false;
     }
+    generation_++;
+    cursor_.version++; // quien dibuja el cursor lo vuelve a subir al dispositivo nuevo
 
     const char *fmt_name = is_hdr() ? "HDR (se convierte a SDR)" : "SDR";
     fprintf(stderr, "[captura] monitor #%d: %dx%d, formato %s\n", monitor_index_, width_,
@@ -268,12 +269,6 @@ bool DxgiCapture::init(int monitor_index, bool first_time) {
 // acquire
 // ---------------------------------------------------------------------------
 DxgiCapture::Result DxgiCapture::acquire(int timeout_ms) {
-    // Desmapeamos el frame anterior (si quedo mapeado).
-    if (mapped_ok_) {
-        device_ctx_->Unmap(staging_, 0);
-        mapped_ok_ = false;
-    }
-
     DXGI_OUTDUPL_FRAME_INFO info{};
     IDXGIResource *resource = nullptr;
 
@@ -284,6 +279,15 @@ DxgiCapture::Result DxgiCapture::acquire(int timeout_ms) {
         fprintf(stderr, "[error] AcquireNextFrame fallo (0x%08lx)\n", (unsigned long)hr);
         return Result::Error;
     }
+
+    // Cursor: si se movio, nueva posicion; si cambio de forma, la nueva forma.
+    // (Esto llega aunque la pantalla no haya cambiado.)
+    if (info.LastMouseUpdateTime.QuadPart != 0) {
+        cursor_.visible = info.PointerPosition.Visible != FALSE;
+        cursor_.x = info.PointerPosition.Position.x;
+        cursor_.y = info.PointerPosition.Position.y;
+    }
+    if (info.PointerShapeBufferSize > 0) update_cursor_shape(info.PointerShapeBufferSize);
 
     // Si no hubo un frame nuevo en pantalla, no hay nada que grabar.
     if (info.LastPresentTime.QuadPart == 0) {
@@ -300,30 +304,72 @@ DxgiCapture::Result DxgiCapture::acquire(int timeout_ms) {
         return Result::NoChange;
     }
 
-    // GPU -> GPU: copia del frame a nuestra textura legible.
-    device_ctx_->CopyResource(staging_, texture);
+    // GPU -> GPU: copia del frame a nuestra textura (no pasa por la CPU).
+    device_ctx_->CopyResource(frame_tex_, texture);
     texture->Release();
     duplication_->ReleaseFrame();
 
-    // Ahora si podemos mapear la textura desde la CPU.
-    hr = device_ctx_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped_);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[error] no pude mapear la textura (0x%08lx)\n", (unsigned long)hr);
-        return Result::Error;
-    }
-    mapped_ok_ = true;
     has_frame_ = true;
     return Result::Frame;
 }
 
 // ---------------------------------------------------------------------------
-// remap_last: la textura staging_ conserva el ultimo frame copiado hasta el
-// proximo CopyResource, asi que basta con volver a mapearla.
+// Forma del cursor -> BGRA. Windows la manda en tres formatos:
+//   * COLOR: BGRA con transparencia normal.
+//   * MASKED_COLOR: BGRA donde alpha 0 = pintar ese color y alpha 255 = hacer
+//     XOR con lo que hay debajo.
+//   * MONOCHROME: dos mascaras de 1 bit (AND y XOR), una debajo de la otra.
+// Los pixeles que "invierten" el fondo (cursor de texto) no se pueden
+// representar con alpha normal: los marcamos con alpha = 1 y el shader los
+// dibuja invirtiendo el color de abajo.
 // ---------------------------------------------------------------------------
-bool DxgiCapture::remap_last() {
-    if (!has_frame_ || !staging_) return false;
-    if (mapped_ok_) return true;
-    if (FAILED(device_ctx_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped_))) return false;
-    mapped_ok_ = true;
-    return true;
+void DxgiCapture::update_cursor_shape(UINT buffer_size) {
+    if (shape_buf_.size() < buffer_size) shape_buf_.resize(buffer_size);
+    UINT required = 0;
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO si{};
+    if (FAILED(duplication_->GetFramePointerShape(buffer_size, shape_buf_.data(), &required,
+                                                  &si)))
+        return;
+
+    const bool mono = si.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME;
+    const int w = (int)si.Width;
+    const int h = mono ? (int)si.Height / 2 : (int)si.Height;
+    const uint8_t *src = shape_buf_.data();
+    std::vector<uint8_t> out((size_t)w * h * 4, 0);
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint8_t *d = &out[((size_t)y * w + x) * 4];
+            if (mono) {
+                int bit = 7 - (x & 7);
+                int and_bit = (src[(size_t)y * si.Pitch + x / 8] >> bit) & 1;
+                int xor_bit = (src[(size_t)(y + h) * si.Pitch + x / 8] >> bit) & 1;
+                if (!and_bit) { // pintar negro o blanco
+                    uint8_t v = xor_bit ? 255 : 0;
+                    d[0] = d[1] = d[2] = v;
+                    d[3] = 255;
+                } else if (xor_bit) {
+                    d[3] = 1; // invertir
+                }
+                continue;
+            }
+            const uint8_t *s = src + (size_t)y * si.Pitch + (size_t)x * 4;
+            if (si.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR) {
+                if (s[3] == 0) {
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+                    d[3] = 255;
+                } else if (s[0] | s[1] | s[2]) {
+                    d[3] = 1; // XOR con un color: lo aproximamos invirtiendo
+                }
+            } else { // COLOR
+                d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+                d[3] = s[3] < 3 ? 0 : s[3]; // alpha 1 y 2 quedan reservados
+            }
+        }
+    }
+
+    cursor_.width = w;
+    cursor_.height = h;
+    cursor_.bgra.swap(out);
+    cursor_.version++;
 }

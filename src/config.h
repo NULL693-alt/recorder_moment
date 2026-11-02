@@ -19,11 +19,14 @@ struct AppConfig {
     int audio_kbps = 160;        // bitrate del audio (AAC)
     int mic_volume = 100;        // volumen del microfono, en % (0..200)
     int out_height = 0;          // altura del video de salida; 0 = nativa
+    std::string video_codec = "h264"; // "h264" o "av1"
     bool audio_enabled = true;   // grabar audio (sistema + microfono)
     bool mic_enabled = true;     // sumar el microfono a la mezcla
     std::string output_device;   // id WASAPI de salida; vacio = predeterminado
     std::string mic_device;      // id WASAPI del microfono; vacio = predeterminado
     bool minimize_to_tray = false; // arrancar minimizado en la bandeja
+    bool clip_sound = true;        // sonido al guardar un clip (o al fallar)
+    bool record_cursor = true;     // dibujar el cursor del mouse en el video
 };
 
 // Ruta del archivo de config (recorder_config.ini, al lado del ejecutable).

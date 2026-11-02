@@ -25,6 +25,7 @@
 #include <shlobj.h>
 
 #include <d3d11.h>
+#include <dwmapi.h>
 
 #include <atomic>
 #include <cstring>
@@ -50,7 +51,14 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 // Mensajes propios de la ventana.
 #define WM_TRAYICON (WM_APP + 1)
+#define WM_CLIP_NOTICE (WM_APP + 3) // termino un pedido de clip (lParam = ClipNotice*)
 #define TRAY_UID 1
+
+// Lo que manda el hilo de guardado a la ventana al terminar un clip.
+struct ClipNotice {
+    bool ok;
+    std::string msg; // ruta del clip, o por que fallo
+};
 
 // Id del icono dentro de resources/recorder.rc.
 #define IDI_APPICON 101
@@ -61,6 +69,7 @@ enum {
     IDM_STARTSTOP,
     IDM_SAVE,
     IDM_OPEN,
+    IDM_OPEN_LAST,
     IDM_EXIT,
 };
 
@@ -102,6 +111,8 @@ struct GuiState {
     bool tray_added = false;
     bool want_quit = false;
     bool startup_enabled = false;   // "Iniciar con Windows"
+    std::wstring startup_other;     // si la clave Run apunta a OTRA copia del .exe, su ruta
+    std::wstring last_clip;         // ultimo clip guardado (para abrirlo desde el aviso)
 };
 
 static GuiState g;
@@ -180,6 +191,12 @@ static void start_recording() {
             g.log_lines.erase(g.log_lines.begin(), g.log_lines.begin() + 100);
         g.log_version.fetch_add(1);
     });
+    g.recorder->set_clip_callback([](bool ok, const std::string &msg) {
+        // Llega desde el hilo de guardado: se lo pasamos a la ventana, que es la
+        // que puede tocar el icono de la bandeja.
+        ClipNotice *n = new ClipNotice{ok, msg};
+        if (!PostMessageW(g_hwnd, WM_CLIP_NOTICE, 0, (LPARAM)n)) delete n;
+    });
 
     Recorder *r = g.recorder.get();
     g.rec_thread = std::thread([r]() {
@@ -247,29 +264,40 @@ static bool same_path(const std::wstring &a, const std::wstring &b) {
     return true;
 }
 
-// true si la clave Run ya apunta a este mismo .exe. Si apunta a otro lado (por
-// ejemplo, moviste la carpeta), lo tomamos como "no configurado" para no mentir
-// con la casilla.
-static bool startup_registered() {
+// Ruta del .exe anotada en la clave Run (sin comillas); vacio si no hay.
+static std::wstring startup_stored_path() {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS)
-        return false;
-    wchar_t buf[1024];
-    DWORD size = sizeof(buf);
+        return std::wstring();
+    wchar_t buf[1024] = {0};
+    DWORD size = sizeof(buf) - sizeof(wchar_t);
     DWORD type = 0;
     LONG r = RegQueryValueExW(key, RUN_VALUE, nullptr, &type, (LPBYTE)buf, &size);
     RegCloseKey(key);
-    if (r != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return false;
+    if (r != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return std::wstring();
 
     std::wstring stored(buf);
     // Le sacamos las comillas con las que lo guardamos.
     if (stored.size() >= 2 && stored.front() == L'"' && stored.back() == L'"')
         stored = stored.substr(1, stored.size() - 2);
-    if (stored.empty()) return false;
+    return stored;
+}
 
+// true si la clave Run ya apunta a este mismo .exe. Si apunta a otra copia (por
+// ejemplo, la de dist\ mientras corres la de build\), la casilla sale
+// desmarcada y la interfaz dice cual es la que arranca.
+static bool startup_registered() {
+    std::wstring stored = startup_stored_path();
+    if (stored.empty()) return false;
     std::wstring exe = exe_path();
     if (exe.empty()) return true;
     return same_path(stored, exe);
+}
+
+static void refresh_startup_state() {
+    g.startup_enabled = startup_registered();
+    std::wstring stored = startup_stored_path();
+    g.startup_other = (!stored.empty() && !g.startup_enabled) ? stored : std::wstring();
 }
 
 // Anota (o borra) el arranque automatico. Devuelve false si Windows lo rechazo.
@@ -327,17 +355,158 @@ static void tray_remove(HWND hwnd) {
     g.tray_added = false;
 }
 
+static void open_clips_folder() {
+    std::string dir = g.out_dir_buf[0] ? g.out_dir_buf : ".";
+    std::wstring w = utf8_to_wide(dir);
+    ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// ---------------------------------------------------------------------------
+// Aviso en pantalla ("Clip guardado")
+//
+// Una ventanita propia en la esquina superior derecha del monitor donde estas
+// jugando, que se va sola a los 2,5 s. No usamos las notificaciones de Windows
+// porque se pueden tener apagadas (o el "No molestar" las oculta mientras
+// jugas). La ventana no roba el foco, deja pasar los clics y esta excluida de
+// la captura, asi que no aparece en los clips. (En pantalla completa exclusiva
+// no se ve: ahi queda solo el sonido.)
+// ---------------------------------------------------------------------------
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+#define TOAST_TIMER 1
+
+static HWND g_toast = nullptr;
+static bool g_toast_ok = true;
+static std::wstring g_toast_title, g_toast_text;
+static float g_toast_scale = 1.0f;
+
+static LRESULT WINAPI ToastProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const float s = g_toast_scale;
+
+            HBRUSH bg = CreateSolidBrush(RGB(30, 30, 36));
+            FillRect(dc, &rc, bg);
+            DeleteObject(bg);
+            RECT bar = {0, 0, (int)(6 * s), rc.bottom};
+            HBRUSH accent = CreateSolidBrush(g_toast_ok ? RGB(46, 204, 113) : RGB(231, 76, 60));
+            FillRect(dc, &bar, accent);
+            DeleteObject(accent);
+
+            SetBkMode(dc, TRANSPARENT);
+            HFONT title = CreateFontW(-(int)(17 * s), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+                                      DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HFONT body = CreateFontW(-(int)(13 * s), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                     0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            int left = (int)(20 * s);
+            RECT rt = {left, (int)(12 * s), rc.right - (int)(12 * s), (int)(36 * s)};
+            HGDIOBJ old = SelectObject(dc, title);
+            SetTextColor(dc, RGB(240, 240, 245));
+            DrawTextW(dc, g_toast_title.c_str(), -1, &rt, DT_SINGLELINE | DT_END_ELLIPSIS);
+            RECT rb = {left, (int)(38 * s), rc.right - (int)(12 * s), rc.bottom - (int)(8 * s)};
+            SelectObject(dc, body);
+            SetTextColor(dc, RGB(170, 170, 180));
+            DrawTextW(dc, g_toast_text.c_str(), -1, &rb, DT_SINGLELINE | DT_END_ELLIPSIS);
+            SelectObject(dc, old);
+            DeleteObject(title);
+            DeleteObject(body);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_TIMER:
+            KillTimer(hwnd, TOAST_TIMER);
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        default:
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
+
+static void create_toast(HINSTANCE inst) {
+    WNDCLASSEXW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = ToastProc;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"RecorderMomentToast";
+    RegisterClassExW(&wc);
+
+    g_toast = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                                  WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                              wc.lpszClassName, L"", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr,
+                              inst, nullptr);
+    if (!g_toast) return;
+    SetLayeredWindowAttributes(g_toast, 0, 235, LWA_ALPHA);
+    // Que no salga en los clips (ni en OBS/Discord). Windows 10 2004+.
+    SetWindowDisplayAffinity(g_toast, WDA_EXCLUDEFROMCAPTURE);
+    // Esquinas redondeadas en Windows 11 (en Windows 10 se ignora).
+    DWORD round = 2; // DWMWCP_ROUND
+    DwmSetWindowAttribute(g_toast, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &round,
+                          sizeof(round));
+}
+
+static void show_toast(bool ok, const std::wstring &title, const std::wstring &text) {
+    if (!g_toast) return;
+    g_toast_ok = ok;
+    g_toast_title = title;
+    g_toast_text = text;
+
+    // En el monitor de la ventana que tenga el foco (el juego).
+    HMONITOR mon = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(mon, &mi);
+    g_toast_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(mon);
+    if (g_toast_scale <= 0.0f) g_toast_scale = 1.0f;
+
+    int w = (int)(340 * g_toast_scale);
+    int h = (int)(64 * g_toast_scale);
+    int margin = (int)(24 * g_toast_scale);
+    int x = mi.rcMonitor.right - w - margin;
+    int y = mi.rcMonitor.top + margin;
+    SetWindowPos(g_toast, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(g_toast, nullptr, TRUE);
+    SetTimer(g_toast, TOAST_TIMER, 2500, nullptr);
+}
+
+// Aviso al terminar un clip: el cartel en pantalla y, si esta activado, un
+// sonido corto (se oye aunque estes en un juego en pantalla completa).
+static void notify_clip(bool ok, const std::string &msg) {
+    if (g.cfg.clip_sound) MessageBeep(ok ? MB_OK : MB_ICONHAND);
+
+    if (ok) {
+        g.last_clip = utf8_to_wide(msg);
+        size_t slash = g.last_clip.find_last_of(L"\\/");
+        show_toast(true, L"Clip guardado",
+                   slash == std::wstring::npos ? g.last_clip : g.last_clip.substr(slash + 1));
+    } else {
+        show_toast(false, L"No se guardo el clip", utf8_to_wide(msg));
+    }
+}
+
+// Abre el Explorador con el ultimo clip seleccionado (o la carpeta de clips).
+static void open_last_clip() {
+    if (g.last_clip.empty()) {
+        open_clips_folder();
+        return;
+    }
+    std::wstring args = L"/select,\"" + g.last_clip + L"\"";
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
 static void show_window(HWND hwnd) {
     ShowWindow(hwnd, SW_SHOW);
     ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
 }
 
-static void open_clips_folder() {
-    std::string dir = g.out_dir_buf[0] ? g.out_dir_buf : ".";
-    std::wstring w = utf8_to_wide(dir);
-    ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
 
 static void tray_menu(HWND hwnd) {
     POINT pt;
@@ -354,6 +523,8 @@ static void tray_menu(HWND hwnd) {
                 L"Guardar clip");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_OPEN, L"Abrir carpeta de clips");
+    AppendMenuW(menu, MF_STRING | (g.last_clip.empty() ? MF_GRAYED : 0u), IDM_OPEN_LAST,
+                L"Mostrar el ultimo clip");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Salir");
 
@@ -379,6 +550,9 @@ static void tray_command(HWND hwnd, int id) {
             break;
         case IDM_OPEN:
             open_clips_folder();
+            break;
+        case IDM_OPEN_LAST:
+            open_last_clip();
             break;
         case IDM_EXIT:
             g.want_quit = true;
@@ -481,6 +655,12 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     return 0;
             }
 
+        case WM_CLIP_NOTICE: {
+            std::unique_ptr<ClipNotice> n(reinterpret_cast<ClipNotice *>(lParam));
+            notify_clip(n->ok, n->msg);
+            return 0;
+        }
+
         case WM_COMMAND:
             tray_command(hwnd, LOWORD(wParam));
             return 0;
@@ -562,6 +742,41 @@ static void draw_resolution_combo() {
     ImGui::TextDisabled("Menos resolucion = archivos mas livianos");
 }
 
+// Codec de video. "id" es lo que va en recorder_config.ini.
+static const struct {
+    const char *label;
+    const char *id;
+} kCodecs[] = {
+    {"H.264 (se reproduce en todos lados)", "h264"},
+    {"AV1 (mejor calidad por Mbps, necesita GPU nueva)", "av1"},
+};
+
+static void draw_codec_combo() {
+    ImGui::Text("Codec de video");
+    const int n = (int)(sizeof(kCodecs) / sizeof(kCodecs[0]));
+    int cur = 0;
+    for (int i = 0; i < n; i++)
+        if (g.cfg.video_codec == kCodecs[i].id) cur = i;
+
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::BeginCombo("##codec_combo", kCodecs[cur].label)) {
+        for (int i = 0; i < n; i++) {
+            bool selected = (i == cur);
+            if (ImGui::Selectable(kCodecs[i].label, selected)) g.cfg.video_codec = kCodecs[i].id;
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    if (g.cfg.video_codec == "av1") {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::TextWrapped("Con AV1 podes bajar los Mbps un 30-40%% y se ve igual (clips mas "
+                           "livianos). Para verlos en Windows hace falta la \"Extension de "
+                           "video AV1\" (gratis en Microsoft Store); VLC, Chrome y Discord ya "
+                           "lo reproducen. Si tu GPU no codifica AV1, se graba en H.264.");
+        ImGui::PopStyleColor();
+    }
+}
+
 static void draw_settings(bool running) {
     ImGui::SeparatorText("Ajustes");
 
@@ -607,6 +822,7 @@ static void draw_settings(bool running) {
                          ImGuiSliderFlags_AlwaysClamp)) {
         g.cfg.kbps = mbps * 1000;
     }
+    draw_codec_combo();
     draw_resolution_combo();
 
     ImGui::Text("Duracion del buffer (segundos)");
@@ -630,20 +846,33 @@ static void draw_settings(bool running) {
 
     if (ImGui::Button("Refrescar dispositivos")) refresh_devices();
 
+    ImGui::Checkbox("Grabar el cursor del mouse", &g.cfg.record_cursor);
     ImGui::Checkbox("Minimizar a la bandeja al cerrar", &g.cfg.minimize_to_tray);
 
     ImGui::EndDisabled();
 
+    // Esto se puede cambiar mientras graba: se lee al guardar cada clip.
+    ImGui::Checkbox("Sonido al guardar un clip", &g.cfg.clip_sound);
+
     ImGui::Spacing();
     ImGui::SeparatorText("Arranque");
     if (ImGui::Checkbox("Iniciar con Windows", &g.startup_enabled)) {
-        // Si Windows rechaza el cambio, mostramos el estado real de la clave.
-        if (!set_startup_registered(g.startup_enabled))
-            g.startup_enabled = startup_registered();
+        // Mostramos siempre el estado real de la clave (por si Windows rechazo
+        // el cambio).
+        set_startup_registered(g.startup_enabled);
+        refresh_startup_state();
     }
-    if (g.startup_enabled)
-        ImGui::TextDisabled("Se abre solo al encender la PC (marcalo arriba para"
-                            " que arranque escondido en la bandeja)");
+    if (g.startup_enabled) {
+        ImGui::TextDisabled("Se abre solo al encender la PC (marca \"Minimizar a la bandeja\""
+                            " para que arranque escondido)");
+    } else if (!g.startup_other.empty()) {
+        std::string other = wide_to_utf8(g.startup_other.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::TextWrapped("Windows abre otra copia al encender la PC: %s. Marca la casilla "
+                           "para que abra esta.",
+                           other.c_str());
+        ImGui::PopStyleColor();
+    }
 }
 
 static void draw_controls(bool running) {
@@ -730,7 +959,7 @@ int run_gui() {
     refresh_devices();
 
     // Estado real del arranque automatico (la clave Run manda, no el .ini).
-    g.startup_enabled = startup_registered();
+    refresh_startup_state();
 
     // Si "out_dir" es relativo (el valor por defecto es "."), lo anclamos a la
     // carpeta del .exe. Asi, cuando Windows abre el programa al iniciar sesion
@@ -781,6 +1010,7 @@ int run_gui() {
     ShowWindow(hwnd, g.cfg.minimize_to_tray ? SW_HIDE : SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
     tray_add(hwnd);
+    create_toast(wc.hInstance);
 
     // ImGui.
     IMGUI_CHECKVERSION();
@@ -811,7 +1041,16 @@ int run_gui() {
         }
         if (done) break;
 
-        // Si la ventana esta tapada o escondida no gastamos GPU.
+        // Escondida en la bandeja o minimizada: no dibujamos nada. Dormimos
+        // hasta que llegue un mensaje (o 250 ms, para juntar el grabador si se
+        // corto solo), asi en segundo plano no gasta ni CPU ni GPU.
+        if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 250, QS_ALLINPUT);
+            reap_recorder();
+            continue;
+        }
+
+        // Si la ventana esta tapada por otra no gastamos GPU.
         if (g_swapChainOccluded &&
             g_swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
             Sleep(10);
@@ -854,6 +1093,7 @@ int run_gui() {
     save_config();
 
     tray_remove(hwnd);
+    if (g_toast) DestroyWindow(g_toast);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
