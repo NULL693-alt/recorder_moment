@@ -56,19 +56,37 @@ static inline float half_to_float(uint16_t h) {
 
 // Conversion de un valor lineal [0..1] a 8 bits con la curva sRGB.
 static inline uint8_t linear_to_srgb8(float v) {
-    if (v <= 0.0f) return 0;
+    if (!(v > 0.0f)) return 0; // tambien descarta NaN
     if (v >= 1.0f) return 255;
     float s = (v <= 0.0031308f) ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
     int i = (int)(s * 255.0f + 0.5f);
     return (uint8_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
 }
 
+// Cada cuanto se fuerza un keyframe, en tiempo (no en frames): con la pantalla
+// casi quieta llegan pocos frames y un GOP contado en frames podria dejar los
+// keyframes a decenas de segundos.
+static const int64_t kKeyframeIntervalUs = 2000000;
+
+// HDR -> SDR de un canal scRGB lineal. Primero se divide por el blanco SDR, asi
+// lo que en el monitor se ve como contenido SDR queda igual que en SDR. Lo que
+// pasa de un 75% (brillos HDR) se comprime de a poco hacia 1.0 en vez de
+// recortarse de golpe.
+static inline float tonemap_channel(float v, float white) {
+    float x = v / white;
+    if (!(x > 0.0f)) return 0.0f;
+    const float knee = 0.75f;
+    if (x <= knee) return x;
+    return knee + (1.0f - knee) * (1.0f - expf(-(x - knee) / (1.0f - knee)));
+}
+
 // ---------------------------------------------------------------------------
 // open / close
 // ---------------------------------------------------------------------------
 bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
-                        AVPixelFormat src_fmt, int target_height) {
+                        AVPixelFormat src_fmt, int target_height, float sdr_white_scale) {
     close();
+    last_key_us_ = -1;
 
     width_ = width;
     height_ = height;
@@ -135,9 +153,13 @@ bool VideoEncoder::open(int width, int height, int fps, int bitrate_kbps,
 
     if (hdr_tonemap_) {
         tonemap_buf_.resize((size_t)width_ * height_ * 4);
-        // Tabla lineal -> sRGB 8 bits (1024 pasos) para no llamar a powf por pixel.
-        srgb_lut_.resize(1024);
-        for (int i = 0; i < 1024; i++) srgb_lut_[i] = linear_to_srgb8((float)i / 1023.0f);
+        // Tabla con el resultado para cada uno de los 65536 half-float posibles:
+        // por pixel queda una sola lectura de tabla (sin conversiones ni powf).
+        float white = sdr_white_scale >= 1.0f ? sdr_white_scale : 1.0f;
+        tonemap_lut_.resize(65536);
+        for (int i = 0; i < 65536; i++)
+            tonemap_lut_[i] = linear_to_srgb8(tonemap_channel(half_to_float((uint16_t)i), white));
+        fprintf(stderr, "[ffmpeg] HDR: blanco SDR = %.0f nits\n", white * 80.0f);
     }
 
     if (out_width_ != width_ || out_height_ != height_)
@@ -161,12 +183,20 @@ bool VideoEncoder::try_open(const Candidate &cand, int fps, int bitrate_kbps) {
     ctx->time_base = time_base_;
     ctx->framerate = AVRational{fps, 1};
     ctx->pix_fmt = AV_PIX_FMT_NV12;
-    ctx->gop_size = fps * 2;
+    // Los keyframes los forzamos cada kKeyframeIntervalUs; el GOP queda largo
+    // solo como respaldo (si no, salen keyframes dobles pegados).
+    ctx->gop_size = fps * 10;
     ctx->max_b_frames = 0;
     ctx->bit_rate = (int64_t)bitrate_kbps * 1000;
     if (strcmp(cand.name, "libx264") == 0) ctx->rc_buffer_size = bitrate_kbps * 2000;
 
     if (cand.preset) av_opt_set(ctx->priv_data, "preset", cand.preset, 0);
+
+    // Los keyframes que forzamos por tiempo tienen que ser IDR (si no, el
+    // paquete no sale marcado como keyframe y el clip no puede empezar ahi).
+    // Cada codificador lo llama distinto; el que no lo tenga lo ignora.
+    av_opt_set_int(ctx->priv_data, "forced_idr", 1, 0); // qsv, amf
+    av_opt_set_int(ctx->priv_data, "forced-idr", 1, 0); // nvenc, libx264
 
     // Quick Sync necesita un "dispositivo" que representa al chip de la GPU.
     if (cand.is_qsv) {
@@ -198,7 +228,7 @@ void VideoEncoder::close() {
     if (codec_ctx_) avcodec_free_context(&codec_ctx_);
     encoder_name_ = nullptr;
     tonemap_buf_.clear();
-    srgb_lut_.clear();
+    tonemap_lut_.clear();
 }
 
 VideoEncoder::~VideoEncoder() { close(); }
@@ -210,19 +240,11 @@ void VideoEncoder::tonemap_to_bgra(const uint8_t *data, int pitch) {
     for (int y = 0; y < height_; y++) {
         const uint16_t *src = reinterpret_cast<const uint16_t *>(data + (size_t)y * pitch);
         uint8_t *dst = tonemap_buf_.data() + (size_t)y * width_ * 4;
+        const uint8_t *lut = tonemap_lut_.data();
         for (int x = 0; x < width_; x++) {
-            float r = half_to_float(src[0]);
-            float g = half_to_float(src[1]);
-            float b = half_to_float(src[2]);
-            int ri = (int)(r * 1023.0f);
-            int gi = (int)(g * 1023.0f);
-            int bi = (int)(b * 1023.0f);
-            ri = ri < 0 ? 0 : (ri > 1023 ? 1023 : ri);
-            gi = gi < 0 ? 0 : (gi > 1023 ? 1023 : gi);
-            bi = bi < 0 ? 0 : (bi > 1023 ? 1023 : bi);
-            dst[0] = srgb_lut_[bi]; // BGRA
-            dst[1] = srgb_lut_[gi];
-            dst[2] = srgb_lut_[ri];
+            dst[0] = lut[src[2]]; // BGRA
+            dst[1] = lut[src[1]];
+            dst[2] = lut[src[0]];
             dst[3] = 255;
             src += 4;
             dst += 4;
@@ -258,12 +280,22 @@ bool VideoEncoder::encode(const uint8_t *data, int pitch, int64_t pts_us,
     sws_scale(sws_, src, stride, 0, height_, nv12_->data, nv12_->linesize);
     nv12_->pts = pts_us;
 
+    // Keyframe por tiempo (el codificador igual pone los suyos por GOP).
+    bool force_key = last_key_us_ < 0 || pts_us - last_key_us_ >= kKeyframeIntervalUs;
+    nv12_->pict_type = force_key ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+    if (force_key) last_key_us_ = pts_us;
+
     int r = avcodec_send_frame(codec_ctx_, nv12_);
     if (r < 0) {
         fprintf(stderr, "[error] avcodec_send_frame fallo\n");
         return false;
     }
-    drain(on_packet);
+    // Tambien contamos los keyframes que pone el codificador por su GOP, para
+    // no meter keyframes de mas.
+    drain([this, &on_packet](const AVPacket *pkt) {
+        if ((pkt->flags & AV_PKT_FLAG_KEY) && pkt->pts > last_key_us_) last_key_us_ = pkt->pts;
+        on_packet(pkt);
+    });
     return true;
 }
 

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,11 @@ Recorder::Recorder(const AppConfig &cfg) : buffer_(cfg.clip_seconds), cfg_(cfg) 
 
 Recorder::~Recorder() {
     if (hotkey_.joinable()) hotkey_.join();
+    join_save();
+}
+
+void Recorder::join_save() {
+    if (save_thread_.joinable()) save_thread_.join();
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +99,7 @@ bool Recorder::start_audio() {
         audio_enabled_ = false;
         return false;
     }
-    audio_open_us_ = now_us();
+    audio_next_index_ = 0;
     return true;
 }
 
@@ -104,20 +110,39 @@ bool Recorder::start_audio() {
 // ---------------------------------------------------------------------------
 void Recorder::pump_audio() {
     if (!audio_enabled_ || !audio_encoder_.is_open()) return;
-    if (start_time_us_ < 0) return; // todavia no arranco el video
+    if (start_time_us_ < 0) return; // todavia no arranco el bucle
 
     const int sr = audio_capture_.sample_rate();
     const int ch = audio_capture_.channels();
     const int kChunk = sr / 10; // hasta 100 ms por vuelta
     std::vector<int16_t> buf((size_t)kChunk * ch);
 
+    // La muestra N del codificador es la muestra N de la captura, que se tomo
+    // en audio_capture_.start_us() + N/sr: de ahi sale su marca de tiempo.
+    const int64_t audio_origin_us = audio_capture_.start_us() - start_time_us_;
+    auto on_packet = [this, sr, audio_origin_us](const AVPacket *pkt) {
+        int64_t pts_us = audio_origin_us + (int64_t)pkt->pts * 1000000 / sr;
+        buffer_.push_audio(pkt, pts_us);
+    };
+
     int got;
-    while ((got = audio_capture_.read(buf.data(), kChunk)) > 0) {
-        audio_encoder_.encode(buf.data(), got, [this, sr](const AVPacket *pkt) {
-            int64_t pts_us =
-                audio_open_us_ - start_time_us_ + (int64_t)pkt->pts * 1000000 / sr;
-            buffer_.push_audio(pkt, pts_us);
-        });
+    int64_t first = 0;
+    while ((got = audio_capture_.read(buf.data(), kChunk, &first)) > 0) {
+        // Si la captura tuvo que descartar muestras (el bucle se freno mucho,
+        // por ejemplo reconectando la pantalla), rellenamos el hueco con
+        // silencio: asi la cuenta de muestras sigue pegada al reloj y el audio
+        // no queda corrido el resto de la grabacion.
+        if (first > audio_next_index_) {
+            std::vector<int16_t> zeros((size_t)kChunk * ch, 0);
+            int64_t gap = first - audio_next_index_;
+            while (gap > 0) {
+                int n = (int)(gap < kChunk ? gap : kChunk);
+                audio_encoder_.encode(zeros.data(), n, on_packet);
+                gap -= n;
+            }
+        }
+        audio_next_index_ = first + got;
+        audio_encoder_.encode(buf.data(), got, on_packet);
     }
 }
 
@@ -134,7 +159,14 @@ std::string Recorder::make_clip_path() const {
                   tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
     std::string dir = cfg_.out_dir;
     if (!dir.empty() && dir.back() != '\\' && dir.back() != '/') dir += '\\';
-    return dir + name;
+
+    // Dos clips en el mismo segundo no se pisan: el segundo lleva _2, _3...
+    std::string base = dir + name;
+    std::string path = base;
+    std::error_code ec;
+    for (int i = 2; std::filesystem::exists(std::filesystem::u8path(path), ec) && i < 100; i++)
+        path = base.substr(0, base.size() - 4) + "_" + std::to_string(i) + ".mp4";
+    return path;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,16 +177,45 @@ void Recorder::handle_save() {
         log("[clip] todavia no hay video capturado para guardar");
         return;
     }
+    if (saving_.load()) {
+        log("[clip] todavia se esta guardando el clip anterior; proba de nuevo en un momento");
+        return;
+    }
+    join_save(); // el hilo del clip anterior ya termino: lo juntamos
+
+    // Todo lo que usa el hilo de guardado va copiado, porque la captura sigue
+    // llenando el buffer y usando los codificadores mientras tanto.
+    AVCodecParameters *vpar = avcodec_parameters_alloc();
+    if (!vpar || avcodec_parameters_copy(vpar, encoder_.codecpar()) < 0) {
+        avcodec_parameters_free(&vpar);
+        log("[clip] no se pudo guardar el clip");
+        return;
+    }
+    AVCodecParameters *apar = nullptr;
+    if (audio_enabled_ && audio_encoder_.is_open()) {
+        apar = avcodec_parameters_alloc();
+        if (apar && avcodec_parameters_copy(apar, audio_encoder_.codecpar()) < 0)
+            avcodec_parameters_free(&apar);
+    }
+    const AVRational vtb = encoder_.time_base();
+    const AVRational atb = audio_encoder_.time_base();
+    std::unique_ptr<ClipBuffer> snap = buffer_.snapshot();
+
     std::string path = make_clip_path();
     double secs = buffer_.buffered_seconds();
-    const AVCodecParameters *apar =
-        (audio_enabled_ && audio_encoder_.is_open()) ? audio_encoder_.codecpar() : nullptr;
+    if (secs > cfg_.clip_seconds) secs = cfg_.clip_seconds;
     log("[clip] guardando ultimos " + std::to_string((int)secs) + " s en " + path + " ...");
-    if (buffer_.save_to(path, encoder_.codecpar(), encoder_.time_base(), apar,
-                        audio_encoder_.time_base()))
-        log("[clip] listo: " + path);
-    else
-        log("[clip] no se pudo guardar el clip");
+
+    saving_.store(true);
+    save_thread_ = std::thread([this, snap = std::move(snap), vpar, apar, vtb, atb,
+                                path]() mutable {
+        bool ok = snap->save_to(path, vpar, vtb, apar, atb);
+        snap.reset();
+        avcodec_parameters_free(&vpar);
+        if (apar) avcodec_parameters_free(&apar);
+        log(ok ? "[clip] listo: " + path : std::string("[clip] no se pudo guardar el clip"));
+        saving_.store(false);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +259,20 @@ bool Recorder::run() {
 
     hotkey_ = std::thread(&Recorder::hotkey_thread, this);
 
+    // La linea de tiempo arranca ya (no con el primer frame), asi el audio se
+    // empieza a codificar de una aunque la pantalla tarde en cambiar.
+    start_time_us_ = now_us();
+    const int64_t frame_interval_us = 1000000 / cfg_.fps;
+
     while (!Recorder::stop_requested()) {
-        DxgiCapture::Result r = capture_.acquire(200);
+        // Esperamos un frame nuevo como mucho hasta que toque el proximo: si no
+        // llega, se repite el ultimo (ver mas abajo).
+        int timeout_ms = 200;
+        if (encoder_.is_open() && next_frame_us_ >= 0) {
+            int64_t wait_ms = (next_frame_us_ - now_us()) / 1000;
+            timeout_ms = (int)(wait_ms < 0 ? 0 : (wait_ms > 200 ? 200 : wait_ms));
+        }
+        DxgiCapture::Result r = capture_.acquire(timeout_ms);
 
         if (r == DxgiCapture::Result::AccessLost) {
             log("[captura] se perdio la duplicacion, reconectando...");
@@ -214,7 +287,28 @@ bool Recorder::run() {
             break;
         }
 
-        if (r == DxgiCapture::Result::Frame) {
+        // Limite de FPS: DXGI entrega un frame por cada refresco del monitor
+        // (144 Hz, 240 Hz...). Solo codificamos los que tocan segun cfg_.fps; el
+        // margen de 1/8 de frame absorbe el jitter.
+        int64_t t = now_us();
+        bool due = next_frame_us_ < 0 || t >= next_frame_us_ - frame_interval_us / 8;
+
+        // FPS constantes: Windows solo manda frames cuando la pantalla cambia.
+        // Si ya toca un frame y no llego ninguno, repetimos el ultimo capturado
+        // (aunque se haya salteado por el limite de FPS, asi tampoco queda
+        // afuera el ultimo cambio). Un frame repetido pesa casi nada.
+        bool fresh = (r == DxgiCapture::Result::Frame);
+        bool repeat = !fresh && due && encoder_.is_open() && capture_.remap_last();
+
+        if ((fresh && due) || repeat) {
+            // El proximo toca un intervalo despues del anterior, pero nunca a
+            // menos de 3/4 de intervalo de este: si un frame llego tarde no se
+            // compensa con uno pegado (eso se ve como tirones).
+            int64_t base = next_frame_us_ < 0 ? t : next_frame_us_;
+            next_frame_us_ = base + frame_interval_us;
+            if (next_frame_us_ < t + frame_interval_us * 3 / 4)
+                next_frame_us_ = t + frame_interval_us * 3 / 4;
+
             // El codificador se arma con el primer frame, cuando ya sabemos el
             // tamano real del monitor y que formato entrega.
             if (!encoder_.is_open()) {
@@ -227,14 +321,12 @@ bool Recorder::run() {
                 }
                 if (fmt == AV_PIX_FMT_NONE ||
                     !encoder_.open(capture_.width(), capture_.height(), cfg_.fps, cfg_.kbps,
-                                   fmt, cfg_.out_height)) {
+                                   fmt, cfg_.out_height, capture_.sdr_white_scale())) {
                     failed_.store(true);
                     break;
                 }
             }
 
-            int64_t t = now_us();
-            if (start_time_us_ < 0) start_time_us_ = t;
             int64_t pts = t - start_time_us_;
 
             bool ok = encoder_.encode(capture_.data(), capture_.row_pitch(), pts,
@@ -265,6 +357,7 @@ bool Recorder::run() {
     running_.store(false);
     Recorder::request_stop();
     if (hotkey_.joinable()) hotkey_.join();
+    join_save(); // si quedo un clip escribiendose, lo dejamos terminar
     audio_capture_.close();
     audio_encoder_.close();
 

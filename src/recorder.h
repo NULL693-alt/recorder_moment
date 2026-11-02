@@ -70,6 +70,7 @@ private:
     void pump_audio();
     void handle_save();
     std::string make_clip_path() const;
+    void join_save();
     void hotkey_thread();
     void print_status(double buffer_s);
     void log(const std::string &msg);
@@ -86,11 +87,16 @@ private:
     std::thread hotkey_;
     std::atomic<bool> save_requested_{false};
 
+    // El clip se escribe en un hilo aparte para no frenar la captura.
+    std::thread save_thread_;
+    std::atomic<bool> saving_{false};
+
     bool capture_started_ = false;
     std::atomic<bool> failed_{false};
     std::atomic<bool> running_{false};
     int64_t start_time_us_ = -1;
-    int64_t audio_open_us_ = 0;
+    int64_t next_frame_us_ = -1;    // cuando toca el proximo frame (limite de FPS)
+    int64_t audio_next_index_ = 0;  // indice de la proxima muestra de audio esperada
     std::atomic<long> frames_{0};
     std::atomic<double> buffer_seconds_{0.0};
 

@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <string>
 
 extern "C" {
@@ -40,6 +41,11 @@ public:
 
     void clear();
 
+    // Copia de lo que hay ahora en el buffer. Los datos de los paquetes se
+    // comparten (conteo de referencias de FFmpeg), asi que es barata: sirve
+    // para escribir el clip en otro hilo sin frenar la captura.
+    std::unique_ptr<ClipBuffer> snapshot() const;
+
     // Escribe en 'path' los ultimos 'seconds' segundos. Si audio_par es nullptr
     // el clip se guarda solo con video.
     bool save_to(const std::string &path, const AVCodecParameters *video_par,
@@ -57,6 +63,9 @@ private:
     };
 
     static void prune(std::deque<Entry> &q, int seconds, int64_t &last_us);
+    // Como prune(), pero nunca borra el ultimo keyframe anterior al corte: sin
+    // el, el clip no podria empezar en un frame clave.
+    static void prune_video(std::deque<Entry> &q, int seconds, int64_t last_us);
 
     std::deque<Entry> video_;
     std::deque<Entry> audio_;

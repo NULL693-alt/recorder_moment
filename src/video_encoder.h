@@ -38,8 +38,11 @@ public:
     // AV_PIX_FMT_RGBA o AV_PIX_FMT_RGBAF16 (HDR). target_height, si es mayor
     // que 0 y menor que la altura capturada, reescala el video de salida a esa
     // altura (manteniendo la relacion de aspecto); 0 = resolucion nativa.
+    // sdr_white_scale (solo HDR) es el valor scRGB al que Windows pinta el
+    // blanco SDR (1.0 = 80 nits); se usa para que el escritorio y los juegos SDR
+    // no salgan quemados al pasar a SDR.
     bool open(int width, int height, int fps, int bitrate_kbps, AVPixelFormat src_fmt,
-              int target_height = 0);
+              int target_height = 0, float sdr_white_scale = 1.0f);
     void close();
 
     // Codifica un frame ya capturado. pts_us es la marca de tiempo en
@@ -85,6 +88,8 @@ private:
     int out_width_ = 0;  // resolucion del video codificado
     int out_height_ = 0;
 
+    int64_t last_key_us_ = -1; // pts del ultimo keyframe (para forzarlos por tiempo)
+
     std::vector<uint8_t> tonemap_buf_;
-    std::vector<uint8_t> srgb_lut_; // tabla lineal -> 8 bits sRGB
+    std::vector<uint8_t> tonemap_lut_; // half-float (los 65536 valores) -> 8 bits sRGB
 };

@@ -10,3 +10,6 @@ tools/
 
 # Logs y basura temporal
 *.log
+
+# Cache de clangd (IntelliSense)
+.cache/

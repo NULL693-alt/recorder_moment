@@ -75,6 +75,27 @@ static int app_main(int argc, char **argv) {
         return 0;
     }
 
+    // Una sola instancia: dos grabadores a la vez capturarian todo dos veces y
+    // cada F9 guardaria dos clips. El mutex vive hasta que el proceso termina.
+    HANDLE instance_mutex = CreateMutexW(nullptr, FALSE, L"Local\\recorder_moment_instance");
+    if (instance_mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (cli) {
+            attach_console();
+            fprintf(stderr, "recorder_moment ya esta abierto; cerralo antes de usar --cli.\n");
+        } else {
+            // Traemos al frente la ventana que ya estaba (aunque este en la bandeja).
+            HWND other = FindWindowW(RECORDER_WINDOW_CLASS, nullptr);
+            if (other) {
+                DWORD pid = 0;
+                GetWindowThreadProcessId(other, &pid);
+                AllowSetForegroundWindow(pid);
+                PostMessageW(other, WM_RECORDER_SHOW, 0, 0);
+            }
+        }
+        CloseHandle(instance_mutex);
+        return 0;
+    }
+
     // Modo por defecto: interfaz grafica.
     if (!cli) return run_gui();
 

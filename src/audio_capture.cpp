@@ -23,6 +23,11 @@ static const GUID kSubtypePcm = {
 static const GUID kSubtypeFloat = {
     0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
 
+// Margen con el que la mezcla va por detras del reloj (y nivel objetivo de
+// cada FIFO de entrada). WASAPI entrega paquetes cada ~10 ms con algo de
+// jitter: 100 ms sobra para que nunca falten datos al mezclar.
+static const int64_t kLatencyUs = 100000;
+
 static int64_t now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -148,6 +153,9 @@ void AudioCapture::close_source(Source &s) {
     s.fifo.clear();
     s.zero_in.clear();
     s.ok = false;
+    s.primed = false;
+    s.compensating = false;
+    s.last_drift_us = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,10 +250,42 @@ void AudioCapture::push_frames(Source &s, const uint8_t *data, UINT32 frames, bo
     int got = swr_convert(s.swr, &outp, out_max, &in, (int)frames);
     s.fifo.resize(old + (size_t)(got > 0 ? got : 0) * channels_);
 
-    // Tope: si un endpoint se atrasa, no acumulamos mas de 2 segundos.
-    size_t max_frames = (size_t)sample_rate_ * 2;
+    // Tope: la correccion de deriva mantiene el FIFO cerca del margen; si aun
+    // asi se pasa de 1 segundo (algo raro paso), lo recortamos al margen.
+    size_t max_frames = (size_t)sample_rate_;
+    size_t keep = (size_t)(kLatencyUs * sample_rate_ / 1000000);
     if (s.fifo.size() > max_frames * channels_)
-        s.fifo.erase(s.fifo.begin(), s.fifo.end() - max_frames * channels_);
+        s.fifo.erase(s.fifo.begin(), s.fifo.end() - keep * channels_);
+}
+
+// ---------------------------------------------------------------------------
+// Deriva: el reloj de la placa de sonido nunca va exactamente al mismo ritmo
+// que el de la PC. Si el FIFO de una fuente se aleja del margen, le pedimos a
+// swresample que estire o encoja ese audio (como mucho 0,5%, inaudible) hasta
+// volver al margen. Asi no hay cortes ni el audio se va corriendo con las horas.
+// ---------------------------------------------------------------------------
+void AudioCapture::adjust_drift(Source &s) {
+    if (!s.ok || !s.primed || !s.swr) return;
+    int64_t now = now_us();
+    if (now - s.last_drift_us < 250000) return; // revisamos cada 250 ms
+    s.last_drift_us = now;
+
+    int64_t level = (int64_t)(s.fifo.size() / channels_);
+    int64_t target = kLatencyUs * sample_rate_ / 1000000;
+    int64_t err = level - target;
+    int64_t dead = sample_rate_ / 50; // +-20 ms: dentro de eso no tocamos nada
+    int64_t max_delta = sample_rate_ / 200;
+
+    int delta = 0;
+    if (err > dead || err < -dead) {
+        int64_t d = -err;
+        if (d > max_delta) d = max_delta;
+        if (d < -max_delta) d = -max_delta;
+        delta = (int)d;
+    }
+    if (delta == 0 && !s.compensating) return;
+    // delta muestras de mas (o de menos) repartidas en el proximo segundo.
+    if (swr_set_compensation(s.swr, delta, sample_rate_) >= 0) s.compensating = (delta != 0);
 }
 
 void AudioCapture::drain(Source &s) {
@@ -266,11 +306,15 @@ void AudioCapture::drain(Source &s) {
 // Producir la mezcla a ritmo de tiempo real (con mutex_ tomado)
 // ---------------------------------------------------------------------------
 void AudioCapture::produce_locked() {
-    int64_t target = (now_us() - start_us_) * sample_rate_ / 1000000;
+    // La mezcla va kLatencyUs por detras del reloj: la muestra N se produce
+    // en start_us_ + kLatencyUs + N/sr, pero contiene lo capturado en
+    // start_us_ + N/sr (cada FIFO de entrada guarda justo ese margen).
+    int64_t target = (now_us() - start_us_ - kLatencyUs) * sample_rate_ / 1000000;
     int64_t todo = target - produced_frames_;
     if (todo <= 0) return;
 
     const int64_t kChunk = sample_rate_ / 10; // hasta 100 ms por vuelta
+    const size_t latency_frames = (size_t)(kLatencyUs * sample_rate_ / 1000000);
 
     while (todo > 0) {
         int block = (int)(todo < kChunk ? todo : kChunk);
@@ -278,8 +322,15 @@ void AudioCapture::produce_locked() {
         out_fifo_.resize(out_off + (size_t)block * channels_);
         int16_t *dst = out_fifo_.data() + out_off;
 
-        int sys_frames = (int)(sys_.fifo.size() / channels_);
-        int mic_frames = has_mic_ ? (int)(mic_.fifo.size() / channels_) : 0;
+        // Una fuente que se quedo sin datos espera a juntar el margen entero
+        // antes de volver a sonar; si no, cada paquete que llega 1 ms tarde
+        // dejaria un hueco de silencio (chasquido) y un desfase.
+        if (!sys_.primed && sys_.fifo.size() / channels_ >= latency_frames) sys_.primed = true;
+        if (has_mic_ && !mic_.primed && mic_.fifo.size() / channels_ >= latency_frames)
+            mic_.primed = true;
+
+        int sys_frames = sys_.primed ? (int)(sys_.fifo.size() / channels_) : 0;
+        int mic_frames = (has_mic_ && mic_.primed) ? (int)(mic_.fifo.size() / channels_) : 0;
         const float mic_gain = mic_gain_;
 
         for (int f = 0; f < block; f++) {
@@ -305,9 +356,18 @@ void AudioCapture::produce_locked() {
                                 mic_.fifo.begin() + (size_t)consume * channels_);
         }
 
+        // Si alguna fuente no alcanzo para todo el bloque (por ejemplo, el
+        // sistema dejo de sonar y Windows corto los paquetes), vuelve a juntar
+        // margen.
+        if (sys_.primed && sys_frames < block) sys_.primed = false;
+        if (has_mic_ && mic_.primed && mic_frames < block) mic_.primed = false;
+
         produced_frames_ += block;
         todo -= block;
     }
+
+    adjust_drift(sys_);
+    if (has_mic_) adjust_drift(mic_);
 
     // Si nadie lee, no dejamos crecer la salida mas de 5 segundos.
     size_t max_out = (size_t)sample_rate_ * 5;
@@ -350,10 +410,12 @@ int AudioCapture::available_frames() const {
     return (int)(out_fifo_.size() / channels_);
 }
 
-int AudioCapture::read(int16_t *dst, int max_frames) {
+int AudioCapture::read(int16_t *dst, int max_frames, int64_t *first_index) {
     if (max_frames <= 0) return 0;
     std::lock_guard<std::mutex> lk(mutex_);
     int avail = (int)(out_fifo_.size() / channels_);
+    // Lo que queda en out_fifo_ son las ultimas 'avail' muestras producidas.
+    if (first_index) *first_index = produced_frames_ - avail;
     int n = avail < max_frames ? avail : max_frames;
     if (n <= 0) return 0;
     memcpy(dst, out_fifo_.data(), (size_t)n * channels_ * sizeof(int16_t));

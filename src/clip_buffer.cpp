@@ -33,13 +33,46 @@ void ClipBuffer::prune(std::deque<Entry> &q, int seconds, int64_t &last_us) {
     }
 }
 
+void ClipBuffer::prune_video(std::deque<Entry> &q, int seconds, int64_t last_us) {
+    int64_t keep_from = last_us - (int64_t)(seconds + kExtraMarginSeconds) * 1000000;
+    // Ultimo keyframe que ya quedo antes del corte: de ahi para atras sobra.
+    size_t last_key = 0;
+    bool found = false;
+    for (size_t i = 0; i < q.size() && q[i].pts_us < keep_from; i++) {
+        if (q[i].pkt->flags & AV_PKT_FLAG_KEY) {
+            last_key = i;
+            found = true;
+        }
+    }
+    if (!found) return;
+    for (size_t i = 0; i < last_key; i++) {
+        av_packet_free(&q.front().pkt);
+        q.pop_front();
+    }
+}
+
+std::unique_ptr<ClipBuffer> ClipBuffer::snapshot() const {
+    std::unique_ptr<ClipBuffer> copy(new ClipBuffer(seconds_));
+    for (const Entry &e : video_) {
+        AVPacket *p = av_packet_clone(e.pkt);
+        if (p) copy->video_.push_back(Entry{p, e.pts_us});
+    }
+    for (const Entry &e : audio_) {
+        AVPacket *p = av_packet_clone(e.pkt);
+        if (p) copy->audio_.push_back(Entry{p, e.pts_us});
+    }
+    copy->last_video_us_ = last_video_us_;
+    copy->last_audio_us_ = last_audio_us_;
+    return copy;
+}
+
 void ClipBuffer::push_video(const AVPacket *pkt, int64_t pts_us, bool keyframe) {
     (void)keyframe; // el flag ya viene dentro del paquete
     AVPacket *copy = av_packet_clone(pkt);
     if (!copy) return;
     video_.push_back(Entry{copy, pts_us});
     last_video_us_ = pts_us;
-    prune(video_, seconds_, last_video_us_);
+    prune_video(video_, seconds_, last_video_us_);
 }
 
 void ClipBuffer::push_audio(const AVPacket *pkt, int64_t pts_us) {
@@ -71,13 +104,18 @@ bool ClipBuffer::save_to(const std::string &path, const AVCodecParameters *video
         if ((video_[i].pkt->flags & AV_PKT_FLAG_KEY) && video_[i].pts_us <= cutoff) vstart = i;
     }
     if (vstart == video_.size()) {
-        vstart = 0;
+        // No hay keyframe antes del corte (el buffer todavia no se lleno):
+        // arrancamos en el primero que haya.
         for (size_t i = 0; i < video_.size(); i++) {
             if (video_[i].pkt->flags & AV_PKT_FLAG_KEY) {
                 vstart = i;
                 break;
             }
         }
+    }
+    if (vstart == video_.size()) {
+        fprintf(stderr, "[clip] todavia no hay ningun keyframe en el buffer\n");
+        return false;
     }
 
     // Origen del clip: el instante del primer frame de video que se va a
@@ -111,6 +149,9 @@ bool ClipBuffer::save_to(const std::string &path, const AVCodecParameters *video
     }
     vst->codecpar->codec_tag = 0;
     vst->time_base = video_tb;
+    // FPS del clip para los reproductores (si no, lo adivinan de los tiempos).
+    if (video_par->framerate.num > 0 && video_par->framerate.den > 0)
+        vst->avg_frame_rate = video_par->framerate;
 
     AVStream *ast = nullptr;
     if (with_audio) {

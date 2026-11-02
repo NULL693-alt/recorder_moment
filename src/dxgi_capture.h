@@ -68,6 +68,11 @@ public:
     // Pide un frame nuevo, esperando hasta timeout_ms milisegundos.
     Result acquire(int timeout_ms);
 
+    // Vuelve a dejar visible (data()/row_pitch()) el ultimo frame capturado,
+    // aunque la pantalla no haya cambiado: sirve para repetirlo y mantener los
+    // FPS constantes. Devuelve false si todavia no hay ningun frame.
+    bool remap_last();
+
     // Imprime por stderr la lista de monitores detectados.
     static void list_monitors();
 
@@ -75,6 +80,9 @@ public:
     int height() const { return height_; }
     CaptureFormat format() const { return format_; }
     bool is_hdr() const { return format_ == CaptureFormat::HDR_FLOAT; }
+    // Solo HDR: valor scRGB del blanco SDR (1.0 = 80 nits), segun el ajuste
+    // "brillo del contenido SDR" de Windows. En SDR vale 1.0.
+    float sdr_white_scale() const { return sdr_white_scale_; }
     int monitor_index() const { return monitor_index_; }
 
     // Validos solo despues de acquire() == Frame, hasta el siguiente acquire().
@@ -99,10 +107,12 @@ private:
 
     D3D11_MAPPED_SUBRESOURCE mapped_{};
     bool mapped_ok_ = false;
+    bool has_frame_ = false; // staging_ ya tiene un frame copiado
 
     DXGI_FORMAT dxgi_format_ = DXGI_FORMAT_B8G8R8A8_UNORM;
     CaptureFormat format_ = CaptureFormat::BGRA;
     int width_ = 0;
     int height_ = 0;
     int monitor_index_ = 0;
+    float sdr_white_scale_ = 1.0f;
 };

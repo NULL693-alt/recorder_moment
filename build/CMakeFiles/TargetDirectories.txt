@@ -1,3 +1,0 @@
-C:/Users/NULL/Documents/recorder_moment/build/CMakeFiles/recorder.dir
-C:/Users/NULL/Documents/recorder_moment/build/CMakeFiles/edit_cache.dir
-C:/Users/NULL/Documents/recorder_moment/build/CMakeFiles/rebuild_cache.dir

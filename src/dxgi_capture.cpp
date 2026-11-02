@@ -1,6 +1,44 @@
 #include "dxgi_capture.h"
 
 #include <cstdio>
+#include <cwchar>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// HDR: a que brillo pinta Windows el blanco SDR en este monitor (el ajuste
+// "brillo del contenido SDR"). Devuelve el valor scRGB (1.0 = 80 nits), o 0 si
+// no se pudo averiguar. gdi_name es el DeviceName del output (\\.\DISPLAY1).
+// ---------------------------------------------------------------------------
+static float query_sdr_white_scale(const wchar_t *gdi_name) {
+    UINT32 npaths = 0, nmodes = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &npaths, &nmodes) != ERROR_SUCCESS)
+        return 0.0f;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(npaths);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(nmodes);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &npaths, paths.data(), &nmodes, modes.data(),
+                           nullptr) != ERROR_SUCCESS)
+        return 0.0f;
+
+    for (UINT32 i = 0; i < npaths; i++) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME src{};
+        src.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        src.header.size = sizeof(src);
+        src.header.adapterId = paths[i].sourceInfo.adapterId;
+        src.header.id = paths[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS) continue;
+        if (wcscmp(src.viewGdiDeviceName, gdi_name) != 0) continue;
+
+        DISPLAYCONFIG_SDR_WHITE_LEVEL white{};
+        white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+        white.header.size = sizeof(white);
+        white.header.adapterId = paths[i].targetInfo.adapterId;
+        white.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&white.header) != ERROR_SUCCESS) return 0.0f;
+        // SDRWhiteLevel viene en milesimas: 1000 = 80 nits = 1.0 en scRGB.
+        return (float)white.SDRWhiteLevel / 1000.0f;
+    }
+    return 0.0f;
+}
 
 // ---------------------------------------------------------------------------
 // Listado de monitores (util cuando el indice pedido no existe)
@@ -47,6 +85,7 @@ void DxgiCapture::release() {
     if (device_ctx_) { device_ctx_->Release(); device_ctx_ = nullptr; }
     if (device_) { device_->Release(); device_ = nullptr; }
     mapped_ok_ = false;
+    has_frame_ = false;
 }
 
 DxgiCapture::~DxgiCapture() { release(); }
@@ -189,6 +228,15 @@ bool DxgiCapture::init(int monitor_index, bool first_time) {
     width_ = width;
     height_ = height;
 
+    sdr_white_scale_ = 1.0f;
+    if (is_hdr()) {
+        DXGI_OUTPUT_DESC out_desc{};
+        output_->GetDesc(&out_desc);
+        float s = query_sdr_white_scale(out_desc.DeviceName);
+        // Si Windows no lo informa, 200 nits es un valor tipico.
+        sdr_white_scale_ = s >= 1.0f ? s : 2.5f;
+    }
+
     // Textura "staging": copia del frame en un formato que la CPU si puede
     // leer (D3D11_USAGE_STAGING + CPU_ACCESS_READ).
     D3D11_TEXTURE2D_DESC tex_desc{};
@@ -264,5 +312,18 @@ DxgiCapture::Result DxgiCapture::acquire(int timeout_ms) {
         return Result::Error;
     }
     mapped_ok_ = true;
+    has_frame_ = true;
     return Result::Frame;
+}
+
+// ---------------------------------------------------------------------------
+// remap_last: la textura staging_ conserva el ultimo frame copiado hasta el
+// proximo CopyResource, asi que basta con volver a mapearla.
+// ---------------------------------------------------------------------------
+bool DxgiCapture::remap_last() {
+    if (!has_frame_ || !staging_) return false;
+    if (mapped_ok_) return true;
+    if (FAILED(device_ctx_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped_))) return false;
+    mapped_ok_ = true;
+    return true;
 }

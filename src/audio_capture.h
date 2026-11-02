@@ -13,7 +13,10 @@
 // La mezcla se produce a ritmo fijo (tiempo real) para que el audio no se
 // desincronice del video aunque el dispositivo de salida entre en reposo
 // (cuando no suena nada, Windows deja de mandar datos: en ese caso se usa
-// silencio para esa fuente).
+// silencio para esa fuente). Va un margen fijo (kLatencyUs) por detras del
+// reloj, asi los paquetes que llegan un poco tarde no dejan huecos (chasquidos),
+// y la deriva entre el reloj de la placa de sonido y el de la PC se corrige
+// estirando o encogiendo el audio un poquito (swr_set_compensation).
 //
 // Si no hay microfono, sigue andando solo con el audio del sistema.
 // ============================================================================
@@ -61,8 +64,14 @@ public:
     void close();
 
     // Saca hasta max_frames frames mezclados (16 bits intercalados). Devuelve
-    // cuantos frames copio.
-    int read(int16_t *dst, int max_frames);
+    // cuantos frames copio. Si first_index no es nullptr, recibe el numero de
+    // muestra (desde open) del primer frame copiado: si es mayor que el
+    // esperado es que se descartaron muestras porque nadie las leia a tiempo.
+    int read(int16_t *dst, int max_frames, int64_t *first_index = nullptr);
+
+    // Instante (reloj steady_clock, en microsegundos) en que se capturo la
+    // muestra 0. La muestra N es de start_us() + N / sample_rate().
+    int64_t start_us() const { return start_us_; }
 
     bool is_open() const { return running_.load(); }
     bool has_mic() const { return has_mic_; }
@@ -85,6 +94,11 @@ private:
         std::vector<int16_t> fifo;
         std::vector<uint8_t> zero_in; // buffer de ceros para los paquetes mudos
         bool ok = false;
+        // false mientras se junta el margen de latencia (al arrancar o despues
+        // de quedarse sin datos); mientras tanto esta fuente aporta silencio.
+        bool primed = false;
+        bool compensating = false;  // hay una correccion de deriva activa en swr
+        int64_t last_drift_us = 0;  // ultima vez que se reviso la deriva
     };
 
     bool open_source(Source &s, EDataFlow flow, bool loopback, const std::string &device_id);
@@ -93,6 +107,7 @@ private:
     void drain(Source &s);
     void push_frames(Source &s, const uint8_t *data, UINT32 frames, bool silent);
     void produce_locked(); // requiere mutex_
+    void adjust_drift(Source &s);
 
     Source sys_;
     Source mic_;

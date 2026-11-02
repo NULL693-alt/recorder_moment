@@ -485,6 +485,10 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             tray_command(hwnd, LOWORD(wParam));
             return 0;
 
+        case WM_RECORDER_SHOW: // alguien abrio el programa otra vez
+            show_window(hwnd);
+            return 0;
+
         case WM_CLOSE:
             if (g.cfg.minimize_to_tray && !g.want_quit) {
                 ShowWindow(hwnd, SW_HIDE);
@@ -751,7 +755,7 @@ int run_gui() {
     wc.hIcon = app_icon;
     wc.hIconSm = app_icon;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"RecorderMomentWindow";
+    wc.lpszClassName = RECORDER_WINDOW_CLASS;
     RegisterClassExW(&wc);
 
     float scale = ImGui_ImplWin32_GetDpiScaleForMonitor(
