@@ -56,18 +56,24 @@ public:
     // captura en un hilo aparte. Devuelve false solo si no se pudo capturar
     // el audio del sistema. sys_id/mic_id son ids de WASAPI; vacio = el
     // dispositivo predeterminado. mic_gain es el volumen del microfono
-    // (1.0 = 100%).
+    // (1.0 = 100%). Con separate_tracks (y si hay microfono) ademas de la
+    // mezcla se puede leer el sistema solo y el microfono solo (ver Track).
     bool open(int sample_rate = 48000, int channels = 2,
               const std::string &sys_id = std::string(),
               const std::string &mic_id = std::string(), bool enable_mic = true,
-              float mic_gain = 1.0f);
+              float mic_gain = 1.0f, bool separate_tracks = false);
     void close();
 
-    // Saca hasta max_frames frames mezclados (16 bits intercalados). Devuelve
-    // cuantos frames copio. Si first_index no es nullptr, recibe el numero de
-    // muestra (desde open) del primer frame copiado: si es mayor que el
-    // esperado es que se descartaron muestras porque nadie las leia a tiempo.
-    int read(int16_t *dst, int max_frames, int64_t *first_index = nullptr);
+    // Pistas que se pueden leer: la mezcla siempre; el sistema y el microfono
+    // por separado solo si track_count() == 3.
+    enum Track { kMix = 0, kSystem = 1, kMic = 2 };
+    int track_count() const { return separate_ ? 3 : 1; }
+
+    // Saca hasta max_frames frames de la pista 'track' (16 bits intercalados).
+    // Devuelve cuantos frames copio. Si first_index no es nullptr, recibe el
+    // numero de muestra (desde open) del primer frame copiado: si es mayor que
+    // el esperado es que se descartaron muestras porque nadie las leia a tiempo.
+    int read(int track, int16_t *dst, int max_frames, int64_t *first_index = nullptr);
 
     // Instante (reloj steady_clock, en microsegundos) en que se capturo la
     // muestra 0. La muestra N es de start_us() + N / sample_rate().
@@ -121,10 +127,11 @@ private:
     int sample_rate_ = 48000;
     int channels_ = 2;
     bool has_mic_ = false;
+    bool separate_ = false;  // tambien sistema y microfono por separado
     float mic_gain_ = 1.0f; // volumen del microfono (1.0 = 100%)
 
     mutable std::mutex mutex_;
-    std::vector<int16_t> out_fifo_; // mezcla lista para leer
+    std::vector<int16_t> out_fifo_[3]; // listo para leer, uno por Track
     int64_t start_us_ = 0;
     int64_t produced_frames_ = 0;
 };

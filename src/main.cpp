@@ -59,6 +59,7 @@ static int app_main(int argc, char **argv) {
     bool cli = false;
     bool help = false;
     bool audio = true;
+    bool started_by_windows = false; // "Iniciar con Windows" lo abre con --startup
     std::vector<std::string> args;
 
     for (int i = 1; i < argc; i++) {
@@ -66,6 +67,7 @@ static int app_main(int argc, char **argv) {
         if (a == "-h" || a == "--help") help = true;
         else if (a == "--cli") cli = true;
         else if (a == "--no-audio") audio = false;
+        else if (a == "--startup") started_by_windows = true;
         else args.push_back(a);
     }
 
@@ -97,14 +99,14 @@ static int app_main(int argc, char **argv) {
     }
 
     // Modo por defecto: interfaz grafica.
-    if (!cli) return run_gui();
+    if (!cli) return run_gui(started_by_windows);
 
     // Modo consola: los ajustes guardados son la base y los argumentos pisan
     // solo lo que se haya pasado.
     attach_console();
 
     AppConfig cfg;
-    config_load(cfg, config_default_path());
+    config_load_default(cfg);
     if (args.size() > 0) cfg.out_dir = args[0];
     if (args.size() > 1) { int v = atoi(args[1].c_str()); if (v >= 0) cfg.monitor = v; }
     if (args.size() > 2) { int v = atoi(args[2].c_str()); if (v > 0) cfg.fps = v; }

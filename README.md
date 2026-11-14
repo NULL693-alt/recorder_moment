@@ -55,7 +55,7 @@ Mientras corre, el programa:
 5. Guarda los paquetes de video y AAC ya comprimidos en un **buffer circular**
    (`clip_buffer.*`) con dos colas, que se podan solas para no crecer mas alla
    de la ventana pedida.
-6. Cuando aprietas **F9**, busca el keyframe mas cercano al inicio de la ventana
+6. Cuando aprietas el **atajo** (F9 por defecto), busca el keyframe mas cercano al inicio de la ventana
    y escribe los ultimos N segundos de video y audio sincronizados en un `.mp4`
    nuevo.
 
@@ -67,7 +67,7 @@ Mientras corre, el programa:
 src/
   main.cpp          arranque, modo GUI y modo --cli (linea de comandos)
   gui.*             ventana (Dear ImGui + Direct3D 11) y bandeja del sistema
-  config.*          ajustes persistentes (recorder_config.ini)
+  config.*          ajustes persistentes (%APPDATA%ecorder_moment)
   audio_devices.*   enumerar microfonos y dispositivos de salida
   dxgi_capture.*    captura de pantalla (DirectX 11)
   gpu_convert.*     conversion a NV12, escalado, HDR y cursor (shaders D3D11)
@@ -75,6 +75,7 @@ src/
   audio_capture.*   captura de audio (WASAPI: sistema + microfono)
   audio_encoder.*   codificacion de audio (AAC, FFmpeg)
   clip_buffer.*     buffer circular de los ultimos N segundos
+  clip_editor.*     recortar clips (sin recodificar) y la vista previa del editor
   recorder.*        orquesta todo y maneja los atajos
 third_party/
   imgui/            Dear ImGui (solo el core + backends de Win32 y D3D11)
@@ -136,9 +137,14 @@ Doble clic en `build\recorder.exe` (o desde PowerShell, `.\build\recorder.exe`).
 Se abre una ventana con:
 
 - **Carpeta de clips**: donde se guardan los `.mp4` (boton *Carpeta...* para
-  elegirla).
-- **Monitor**, **FPS**, **Bitrate de video** y **Duracion del buffer**
-  (segundos).
+  elegirla). Si no existe, se crea; por defecto es `Videos\recorder_moment`.
+- **Atajo para guardar un clip**: F9 por defecto. Con *Cambiar* se aprieta la
+  tecla o combinacion nueva (por ejemplo `Ctrl+Shift+S`); Esc cancela. Se
+  detecta con un hook de teclado, asi que no se pierde ninguna pulsacion y la
+  tecla le sigue llegando al juego.
+- **Monitor**: por nombre y resolucion (por ejemplo `1: LG ULTRAGEAR
+  (1920x1080, principal)`).
+- **FPS**, **Bitrate de video** y **Duracion del buffer** (segundos).
 - **Codec de video**: *H.264* o *AV1* (ver arriba). Para ver los clips AV1
   con las apps de Windows hace falta la "Extension de video AV1" (gratis en
   Microsoft Store); VLC, Chrome y Discord ya los reproducen.
@@ -149,22 +155,62 @@ Se abre una ventana con:
   dispositivo de salida y el **microfono** (con *Refrescar dispositivos*),
   un **volumen del microfono** (0–200%) y el **bitrate de audio** (64–320
   kbps).
-- **Iniciar** / **Detener** y **Guardar clip (F9)**, con el estado en vivo
+- **Pistas separadas**: si se marca, el clip lleva 3 pistas de audio: la
+  *Mezcla* (la que suena en cualquier reproductor), solo el *Sistema* y solo el
+  *Microfono*, para ajustarlas por separado en un editor.
+- **Iniciar** / **Detener** y **Guardar clip**, con el estado en vivo
   (frames capturados y cuanto llena el buffer). Al guardar aparece un cartel
   "Clip guardado" arriba a la derecha (no sale en los clips) y suena un tono
   (se puede apagar con **Sonido al guardar un clip**).
+- **Empezar a grabar al abrir el programa**: arranca la grabacion sola.
 - **Minimizar a la bandeja al cerrar**: si esta marcado, cerrar la ventana no
   sale del programa, lo deja en la **bandeja del sistema** (icono junto al
   reloj). Desde ahi, click derecho para *Mostrar*, *Iniciar/Detener*,
   *Guardar clip*, *Abrir carpeta de clips*, *Mostrar el ultimo clip* o
   *Salir*. Escondida en la bandeja, la ventana no gasta CPU ni GPU.
 - **Iniciar con Windows**: si esta marcado, el programa se abre solo al
-  encender la PC. Para que ademas arranque escondido y grabando, marca tambien
-  *Minimizar a la bandeja al cerrar*. Se puede desactivar destildando la
-  casilla (no toca nada mas de tu sistema).
+  encender la PC (con `--startup`). Si ademas esta marcado *Minimizar a la
+  bandeja al cerrar*, arranca escondido en la bandeja; para que tambien grabe,
+  marca *Empezar a grabar al abrir el programa*. Abierto a mano siempre muestra
+  la ventana. Se puede desactivar destildando la casilla (no toca nada mas de
+  tu sistema).
 
-Los ajustes se guardan solos en `recorder_config.ini`, al lado del `.exe`, asi
-que la proxima vez arranca como lo dejaste.
+Los ajustes se guardan solos en `%APPDATA%\recorder_moment\recorder_config.ini`
+(asi funciona aunque el `.exe` este en una carpeta protegida), y la proxima vez
+arranca como lo dejaste. Si venis de una version que los guardaba al lado del
+`.exe`, se leen de ahi la primera vez.
+
+### Recortar clips
+
+La pestaña **Recortar clips** es un editor sencillo para quedarte solo con el
+momento bueno de un clip:
+
+1. Elegi el clip en la lista (estan los de tu carpeta, el mas nuevo primero; se
+   abre solo) o con **Abrir otro...**. Desde la bandeja tambien esta
+   *Recortar el ultimo clip*.
+2. Miralo: **Espacio** o clic en el video para reproducir/pausar (con sonido),
+   las **flechas** saltan 1 s, y se puede hacer clic o arrastrar en la linea de
+   tiempo.
+3. Marca el tramo: **Marcar inicio (I)** y **Marcar fin (O)** en el cuadro que
+   se ve, o arrastra los bordes verde (inicio) y rojo (fin) en la linea de
+   tiempo. **Ver el recorte** reproduce solo ese pedazo.
+4. **Guardar recorte**: lo escribe en la carpeta **`Clips Edit`** (dentro de
+   la carpeta de clips, separado por juego: `Clips Edit\VALORANT\clip_....mp4`)
+   y abre el recorte. Si esta marcado *Borrar el clip original al guardar*
+   (viene marcado), el clip largo se manda a la **Papelera**, asi que si te
+   arrepentis lo podes recuperar de ahi.
+
+Con **Una carpeta por juego** (en los ajustes, viene marcado) cada clip se
+guarda en una subcarpeta con el nombre del juego que tenia el foco al
+guardarlo: `VALORANT\`, `Rocket League\`... El nombre sale del `.exe` del juego
+(o del titulo de la ventana); el escritorio va a `Escritorio\`. Si guardas
+desde la ventana del programa, usa el ultimo juego que tuvo el foco.
+
+El recorte copia el video y el audio tal cual (todas las pistas, con sus
+nombres), asi que es **instantaneo y sin perder calidad**. La contra es que el
+inicio tiene que caer en un cuadro clave (keyframe): en los clips de este
+programa hay uno cada 2 s, y el editor ya corre el inicio al keyframe anterior
+para que veas exactamente desde donde va a empezar.
 
 ### Linea de comandos (`--cli`)
 
@@ -206,6 +252,19 @@ Capturando el monitor #0. Con audio (sistema + microfono). Apreta F9 para guarda
 ```
 [clip] guardando ultimos 120 s en .\clip_20261031_220630.mp4 ...
 [clip] listo: .\clip_20261031_220630.mp4 (120 s, 7200 frames)
+```
+
+## Pruebas automaticas
+
+`tests/recorder_tests.cpp` prueba lo que no necesita grabar la pantalla: el
+buffer de clips (poda sin perder el keyframe, clip con 3 pistas de audio leido
+de vuelta con FFmpeg), la config (guardar/leer, ajustes viejos, valores raros),
+la conversion de color en la GPU (colores, escalado, cursor), AV1 y el editor
+(recorte con sus pistas y tiempos, y el reproductor de la vista previa). Se compila
+junto con el programa y se corre con:
+
+```powershell
+ctest --test-dir build --output-on-failure
 ```
 
 ## Compartir (carpeta portable)

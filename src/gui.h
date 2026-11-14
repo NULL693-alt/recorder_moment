@@ -14,4 +14,6 @@
 
 // Abre la ventana y no vuelve hasta que el usuario sale. Devuelve el codigo de
 // salida del proceso (0 = todo bien).
-int run_gui();
+// started_by_windows = lo abrio "Iniciar con Windows" al encender la PC: si
+// "Minimizar a la bandeja" esta marcado, arranca escondido en la bandeja.
+int run_gui(bool started_by_windows = false);

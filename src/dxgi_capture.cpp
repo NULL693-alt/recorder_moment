@@ -2,22 +2,29 @@
 
 #include <cstdio>
 #include <cwchar>
+#include <string>
 #include <vector>
 
+static std::string wide_to_utf8(const wchar_t *w) {
+    char buf[256] = "";
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, sizeof(buf), nullptr, nullptr);
+    return buf;
+}
+
 // ---------------------------------------------------------------------------
-// HDR: a que brillo pinta Windows el blanco SDR en este monitor (el ajuste
-// "brillo del contenido SDR"). Devuelve el valor scRGB (1.0 = 80 nits), o 0 si
-// no se pudo averiguar. gdi_name es el DeviceName del output (\\.\DISPLAY1).
+// Busca en la configuracion de pantallas de Windows el "camino" (placa de
+// video -> monitor) del output cuyo DeviceName es gdi_name (\\.\DISPLAY1).
+// De ahi salen el nombre del monitor y el brillo del blanco SDR.
 // ---------------------------------------------------------------------------
-static float query_sdr_white_scale(const wchar_t *gdi_name) {
+static bool find_display_path(const wchar_t *gdi_name, DISPLAYCONFIG_PATH_INFO &out) {
     UINT32 npaths = 0, nmodes = 0;
     if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &npaths, &nmodes) != ERROR_SUCCESS)
-        return 0.0f;
+        return false;
     std::vector<DISPLAYCONFIG_PATH_INFO> paths(npaths);
     std::vector<DISPLAYCONFIG_MODE_INFO> modes(nmodes);
     if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &npaths, paths.data(), &nmodes, modes.data(),
                            nullptr) != ERROR_SUCCESS)
-        return 0.0f;
+        return false;
 
     for (UINT32 i = 0; i < npaths; i++) {
         DISPLAYCONFIG_SOURCE_DEVICE_NAME src{};
@@ -27,17 +34,71 @@ static float query_sdr_white_scale(const wchar_t *gdi_name) {
         src.header.id = paths[i].sourceInfo.id;
         if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS) continue;
         if (wcscmp(src.viewGdiDeviceName, gdi_name) != 0) continue;
-
-        DISPLAYCONFIG_SDR_WHITE_LEVEL white{};
-        white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-        white.header.size = sizeof(white);
-        white.header.adapterId = paths[i].targetInfo.adapterId;
-        white.header.id = paths[i].targetInfo.id;
-        if (DisplayConfigGetDeviceInfo(&white.header) != ERROR_SUCCESS) return 0.0f;
-        // SDRWhiteLevel viene en milesimas: 1000 = 80 nits = 1.0 en scRGB.
-        return (float)white.SDRWhiteLevel / 1000.0f;
+        out = paths[i];
+        return true;
     }
-    return 0.0f;
+    return false;
+}
+
+// HDR: a que brillo pinta Windows el blanco SDR en este monitor (el ajuste
+// "brillo del contenido SDR"). Devuelve el valor scRGB (1.0 = 80 nits), o 0 si
+// no se pudo averiguar.
+static float query_sdr_white_scale(const wchar_t *gdi_name) {
+    DISPLAYCONFIG_PATH_INFO path{};
+    if (!find_display_path(gdi_name, path)) return 0.0f;
+    DISPLAYCONFIG_SDR_WHITE_LEVEL white{};
+    white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+    white.header.size = sizeof(white);
+    white.header.adapterId = path.targetInfo.adapterId;
+    white.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&white.header) != ERROR_SUCCESS) return 0.0f;
+    // SDRWhiteLevel viene en milesimas: 1000 = 80 nits = 1.0 en scRGB.
+    return (float)white.SDRWhiteLevel / 1000.0f;
+}
+
+// Nombre comercial del monitor ("LG ULTRAGEAR"); vacio si Windows no lo sabe.
+static std::string query_monitor_name(const wchar_t *gdi_name) {
+    DISPLAYCONFIG_PATH_INFO path{};
+    if (!find_display_path(gdi_name, path)) return std::string();
+    DISPLAYCONFIG_TARGET_DEVICE_NAME target{};
+    target.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    target.header.size = sizeof(target);
+    target.header.adapterId = path.targetInfo.adapterId;
+    target.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&target.header) != ERROR_SUCCESS) return std::string();
+    return wide_to_utf8(target.monitorFriendlyDeviceName);
+}
+
+// ---------------------------------------------------------------------------
+// Monitores, en el mismo orden en que init() los numera.
+// ---------------------------------------------------------------------------
+std::vector<MonitorDesc> DxgiCapture::enumerate_monitors() {
+    std::vector<MonitorDesc> out;
+    IDXGIFactory1 *factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&factory))) return out;
+
+    for (UINT a = 0;; a++) {
+        IDXGIAdapter1 *adapter = nullptr;
+        if (factory->EnumAdapters1(a, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        for (UINT o = 0;; o++) {
+            IDXGIOutput *output = nullptr;
+            if (adapter->EnumOutputs(o, &output) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_OUTPUT_DESC desc{};
+            output->GetDesc(&desc);
+
+            MonitorDesc m;
+            m.width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
+            m.height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+            m.primary = desc.DesktopCoordinates.left == 0 && desc.DesktopCoordinates.top == 0;
+            m.name = query_monitor_name(desc.DeviceName);
+            if (m.name.empty()) m.name = wide_to_utf8(desc.DeviceName); // \\.\DISPLAY1
+            out.push_back(m);
+            output->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,12 +278,12 @@ bool DxgiCapture::init(int monitor_index, bool first_time) {
         return false;
     }
 
-    if (!first_time && (width != width_ || height != height_)) {
-        fprintf(stderr, "[error] la resolucion del monitor cambio de %dx%d a %dx%d. No se "
-                        "puede cambiar el tamano del video a mitad de una grabacion.\n",
-                width_, height_, width, height);
-        return false;
-    }
+    // Si el juego cambio la resolucion del monitor, se sigue grabando: el video
+    // mantiene su tamano y la conversion en la GPU escala la imagen nueva (con
+    // franjas negras si cambio la proporcion).
+    if (!first_time && (width != width_ || height != height_))
+        fprintf(stderr, "[captura] la resolucion del monitor cambio de %dx%d a %dx%d\n", width_,
+                height_, width, height);
 
     width_ = width;
     height_ = height;

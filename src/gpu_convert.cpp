@@ -25,6 +25,7 @@ cbuffer Params : register(b0) {
     float cursor_on;    // 1 = dibujar el cursor
     float2 in_size;     // tamano de la captura
     float4 cursor_rect; // x, y, ancho, alto del cursor (pixeles de la captura)
+    float4 fit;         // xy = parte del destino que ocupa la imagen, zw = donde empieza
 };
 
 void vs_main(uint id : SV_VertexID, out float4 pos : SV_Position) {
@@ -55,7 +56,11 @@ float3 with_cursor(float3 c, float2 uv) {
     return lerp(c, k.rgb, k.a);
 }
 
-float3 fetch(float2 uv) {
+float3 fetch(float2 dst_uv) {
+    // Si la captura tiene otra proporcion que el video (el juego cambio la
+    // resolucion), la imagen va centrada y lo que sobra queda negro.
+    float2 uv = (dst_uv - fit.zw) / fit.xy;
+    if (uv.x < 0 || uv.y < 0 || uv.x > 1 || uv.y > 1) return float3(0, 0, 0);
     float3 c;
     if (tap.x > 0) {
         c = 0.25 * (src.Sample(smp, uv + float2(-tap.x, -tap.y)).rgb +
@@ -214,7 +219,17 @@ bool GpuConverter::open(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11Te
     // Si se achica la imagen, cada pixel de salida promedia 4 lecturas.
     bool scaled = (in_w != out_w || in_h != out_h);
     py_ = Params{(float)out_w, (float)out_h, 0, 0, hdr_white, 0,
-                 (float)in_w, (float)in_h, 0, 0, 0, 0};
+                 (float)in_w, (float)in_h, 0, 0, 0, 0, 1, 1, 0, 0};
+    // Otra proporcion (mas de un 1% de diferencia): la imagen entra entera,
+    // centrada, con franjas negras.
+    const double in_aspect = (double)in_w / in_h, out_aspect = (double)out_w / out_h;
+    if (in_aspect > out_aspect * 1.01) {
+        py_.fit_h = (float)(out_aspect / in_aspect);
+        py_.fit_y = (1.0f - py_.fit_h) * 0.5f;
+    } else if (in_aspect < out_aspect / 1.01) {
+        py_.fit_w = (float)(in_aspect / out_aspect);
+        py_.fit_x = (1.0f - py_.fit_w) * 0.5f;
+    }
     puv_ = py_;
     puv_.out_w = (float)(out_w / 2);
     puv_.out_h = (float)(out_h / 2);

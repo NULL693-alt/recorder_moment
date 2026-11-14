@@ -72,6 +72,7 @@ private:
         float cursor_on;
         float in_w, in_h;
         float cur_x, cur_y, cur_w, cur_h;
+        float fit_w, fit_h, fit_x, fit_y; // encaje de la imagen en el destino
     };
 
     bool draw(ID3D11RenderTargetView *rtv, ID3D11PixelShader *ps, ID3D11Buffer *cb, int w,

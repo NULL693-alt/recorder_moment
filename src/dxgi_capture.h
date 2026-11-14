@@ -34,6 +34,7 @@
 #include <dxgi1_5.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // Formato de pixel que entrega la captura, ya traducido a algo entendible.
@@ -54,6 +55,13 @@ struct CursorInfo {
     // cursor de texto, por ejemplo) van con alpha = 1 (ver gpu_convert).
     std::vector<uint8_t> bgra;
     int version = 0;             // sube cada vez que cambia la forma
+};
+
+// Un monitor, para mostrarlo en la interfaz.
+struct MonitorDesc {
+    std::string name;      // nombre comercial ("LG ULTRAGEAR") o \\.\DISPLAY1
+    int width = 0, height = 0;
+    bool primary = false;  // el principal de Windows
 };
 
 class DxgiCapture {
@@ -87,6 +95,9 @@ public:
 
     // Imprime por stderr la lista de monitores detectados.
     static void list_monitors();
+
+    // Los monitores, en el mismo orden que el indice de init().
+    static std::vector<MonitorDesc> enumerate_monitors();
 
     int width() const { return width_; }
     int height() const { return height_; }

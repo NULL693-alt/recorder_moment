@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <vector>
 
+#include "game_detect.h"
+
 // ---------------------------------------------------------------------------
 // Parada (Ctrl+C en consola, o "Detener" en la interfaz).
 // ---------------------------------------------------------------------------
@@ -29,6 +31,10 @@ void Recorder::install_signal_handler() { SetConsoleCtrlHandler(ctrl_handler, TR
 void Recorder::request_stop() { g_stop.store(true); }
 void Recorder::clear_stop() { g_stop.store(false); }
 bool Recorder::stop_requested() { return g_stop.load(); }
+
+// Sin pantalla mas de esto (PC bloqueada, suspendida...), al volver el buffer
+// se vacia.
+static const int64_t kLongGapSeconds = 10;
 
 static int64_t now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -66,20 +72,68 @@ void Recorder::log(const std::string &msg) {
 // Reconectar la captura (tambien sirve para reintentar cuando el sistema esta
 // ocupado con otras capturas: OBS, Discord, Game Bar).
 // ---------------------------------------------------------------------------
+//
+// Al arrancar se prueba 5 veces y, si no hay caso, se avisa. Pero si la captura
+// se pierde en medio de una grabacion (PC bloqueada, suspendida, un cartel de
+// permisos de administrador, el juego cambiando de resolucion...) se sigue
+// reintentando hasta que la pantalla vuelva: el grabador no se rinde solo.
+// ---------------------------------------------------------------------------
 bool Recorder::ensure_capture() {
-    bool first = !capture_started_;
-    const int attempts = 5;
-    for (int i = 0; i < attempts; i++) {
+    const bool first = !capture_started_;
+    const int first_attempts = 5;
+    const int64_t lost_at = now_us();
+
+    for (int i = 0;; i++) {
         if (capture_.init(cfg_.monitor, first)) {
             capture_started_ = true;
+            if (!first) {
+                // Si estuvo mucho sin pantalla, lo de antes ya no sirve para un
+                // clip (quedaria un cuadro congelado todo ese rato): el buffer
+                // arranca de nuevo.
+                int64_t gap_s = (now_us() - lost_at) / 1000000;
+                if (gap_s >= kLongGapSeconds) {
+                    buffer_.clear();
+                    log("[captura] volvio la pantalla despues de " + std::to_string(gap_s) +
+                        " s: el buffer arranca de nuevo");
+                } else {
+                    log("[captura] reconectado");
+                }
+            }
             return true;
         }
-        if (i + 1 < attempts) {
+        if (first && i + 1 >= first_attempts) return false;
+
+        if (first) {
             log("[captura] reintentando en 1s (" + std::to_string(i + 1) + "/" +
-                std::to_string(attempts) + ")...");
-            Sleep(1000);
+                std::to_string(first_attempts) + ")...");
+        } else if (i == 2) {
+            log("[captura] la pantalla no esta disponible (PC bloqueada o suspendida); se "
+                "sigue reintentando hasta que vuelva...");
         }
+
+        // Esperamos de a poco para que "Detener" no tenga que esperar el segundo
+        // entero, y mientras tanto el audio se sigue sacando para que no se
+        // acumule. Despues de un rato, reintentamos cada 2 s.
+        const int wait_ms = i < 10 ? 1000 : 2000;
+        for (int ms = 0; ms < wait_ms && !Recorder::stop_requested(); ms += 50) {
+            Sleep(50);
+            if (!first) pump_audio();
+        }
+        if (Recorder::stop_requested()) return false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Carpeta de clips: si no existe (o se borro mientras grababa), se crea.
+// Devuelve false con el motivo en 'why' si no se pudo.
+// ---------------------------------------------------------------------------
+bool Recorder::ensure_out_dir(std::string &why) const {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::u8path(cfg_.out_dir);
+    if (std::filesystem::is_directory(dir, ec)) return true;
+    std::filesystem::create_directories(dir, ec);
+    if (std::filesystem::is_directory(dir, ec)) return true;
+    why = "no se pudo crear la carpeta de clips \"" + cfg_.out_dir + "\"";
     return false;
 }
 
@@ -107,17 +161,31 @@ bool Recorder::start_audio() {
     if (!audio_enabled_) return false;
 
     float mic_gain = (float)cfg_.mic_volume / 100.0f;
-    if (!audio_capture_.open(48000, 2, cfg_.output_device, cfg_.mic_device,
-                             cfg_.mic_enabled, mic_gain) ||
-        !audio_encoder_.open(audio_capture_.sample_rate(), audio_capture_.channels(),
-                             cfg_.audio_kbps)) {
+    bool ok = audio_capture_.open(48000, 2, cfg_.output_device, cfg_.mic_device,
+                                  cfg_.mic_enabled, mic_gain, cfg_.separate_audio_tracks);
+
+    // Un codificador AAC por pista: la mezcla, y si van separadas, el sistema
+    // y el microfono.
+    audio_encoders_.clear();
+    for (int t = 0; ok && t < audio_capture_.track_count(); t++) {
+        audio_encoders_.emplace_back(new AudioEncoder());
+        ok = audio_encoders_.back()->open(audio_capture_.sample_rate(),
+                                          audio_capture_.channels(), cfg_.audio_kbps);
+    }
+    if (!ok) {
         log("[audio] no se pudo iniciar el audio; se graba solo video");
-        audio_encoder_.close();
+        audio_encoders_.clear();
         audio_capture_.close();
         audio_enabled_ = false;
         return false;
     }
-    audio_next_index_ = 0;
+
+    buffer_.set_audio_tracks((int)audio_encoders_.size());
+    audio_next_index_.assign(audio_encoders_.size(), 0);
+    if (audio_encoders_.size() > 1)
+        log("[audio] pistas: mezcla + sistema + microfono");
+    else if (cfg_.separate_audio_tracks)
+        log("[audio] sin microfono: el clip lleva una sola pista (sistema)");
     return true;
 }
 
@@ -127,7 +195,7 @@ bool Recorder::start_audio() {
 // el video para que el clip quede sincronizado.
 // ---------------------------------------------------------------------------
 void Recorder::pump_audio() {
-    if (!audio_enabled_ || !audio_encoder_.is_open()) return;
+    if (!audio_enabled_ || audio_encoders_.empty()) return;
     if (start_time_us_ < 0) return; // todavia no arranco el bucle
 
     const int sr = audio_capture_.sample_rate();
@@ -138,36 +206,41 @@ void Recorder::pump_audio() {
     // La muestra N del codificador es la muestra N de la captura, que se tomo
     // en audio_capture_.start_us() + N/sr: de ahi sale su marca de tiempo.
     const int64_t audio_origin_us = audio_capture_.start_us() - start_time_us_;
-    auto on_packet = [this, sr, audio_origin_us](const AVPacket *pkt) {
-        int64_t pts_us = audio_origin_us + (int64_t)pkt->pts * 1000000 / sr;
-        buffer_.push_audio(pkt, pts_us);
-    };
 
-    int got;
-    int64_t first = 0;
-    while ((got = audio_capture_.read(buf.data(), kChunk, &first)) > 0) {
-        // Si la captura tuvo que descartar muestras (el bucle se freno mucho,
-        // por ejemplo reconectando la pantalla), rellenamos el hueco con
-        // silencio: asi la cuenta de muestras sigue pegada al reloj y el audio
-        // no queda corrido el resto de la grabacion.
-        if (first > audio_next_index_) {
-            std::vector<int16_t> zeros((size_t)kChunk * ch, 0);
-            int64_t gap = first - audio_next_index_;
-            while (gap > 0) {
-                int n = (int)(gap < kChunk ? gap : kChunk);
-                audio_encoder_.encode(zeros.data(), n, on_packet);
-                gap -= n;
+    for (int t = 0; t < (int)audio_encoders_.size(); t++) {
+        AudioEncoder &enc = *audio_encoders_[(size_t)t];
+        int64_t &next_index = audio_next_index_[(size_t)t];
+        auto on_packet = [this, t, sr, audio_origin_us](const AVPacket *pkt) {
+            int64_t pts_us = audio_origin_us + (int64_t)pkt->pts * 1000000 / sr;
+            buffer_.push_audio(t, pkt, pts_us);
+        };
+
+        int got;
+        int64_t first = 0;
+        while ((got = audio_capture_.read(t, buf.data(), kChunk, &first)) > 0) {
+            // Si la captura tuvo que descartar muestras (el bucle se freno
+            // mucho, por ejemplo reconectando la pantalla), rellenamos el hueco
+            // con silencio: asi la cuenta de muestras sigue pegada al reloj y
+            // el audio no queda corrido el resto de la grabacion.
+            if (first > next_index) {
+                std::vector<int16_t> zeros((size_t)kChunk * ch, 0);
+                int64_t gap = first - next_index;
+                while (gap > 0) {
+                    int n = (int)(gap < kChunk ? gap : kChunk);
+                    enc.encode(zeros.data(), n, on_packet);
+                    gap -= n;
+                }
             }
+            next_index = first + got;
+            enc.encode(buf.data(), got, on_packet);
         }
-        audio_next_index_ = first + got;
-        audio_encoder_.encode(buf.data(), got, on_packet);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Nombre del archivo del clip
 // ---------------------------------------------------------------------------
-std::string Recorder::make_clip_path() const {
+std::string Recorder::make_clip_path(const std::string &subdir) const {
     std::time_t t = std::time(nullptr);
     std::tm tm_buf{};
     localtime_s(&tm_buf, &t);
@@ -177,6 +250,7 @@ std::string Recorder::make_clip_path() const {
                   tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
     std::string dir = cfg_.out_dir;
     if (!dir.empty() && dir.back() != '\\' && dir.back() != '/') dir += '\\';
+    if (!subdir.empty()) dir += subdir + "\\";
 
     // Dos clips en el mismo segundo no se pisan: el segundo lleva _2, _3...
     std::string base = dir + name;
@@ -185,6 +259,26 @@ std::string Recorder::make_clip_path() const {
     for (int i = 2; std::filesystem::exists(std::filesystem::u8path(path), ec) && i < 100; i++)
         path = base.substr(0, base.size() - 4) + "_" + std::to_string(i) + ".mp4";
     return path;
+}
+
+// Carpeta del juego para el clip ("" = la carpeta de clips, sin subcarpeta).
+// Si no se puede crear la carpeta del juego (permisos, etc.), va a la raiz.
+std::string Recorder::clip_game_folder() {
+    if (!cfg_.clips_by_game) return std::string();
+    std::string game = foreground_app_name();
+    if (game.empty()) { // se guardo desde esta ventana: el ultimo juego que se uso
+        std::lock_guard<std::mutex> lk(app_mutex_);
+        game = last_app_;
+    }
+    if (game.empty()) return std::string();
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::u8path(cfg_.out_dir) / std::filesystem::u8path(game);
+    std::filesystem::create_directories(dir, ec);
+    if (!std::filesystem::is_directory(dir, ec)) {
+        log("[clip] no se pudo crear la carpeta \"" + game + "\"; va a la carpeta de clips");
+        return std::string();
+    }
+    return game;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +301,12 @@ void Recorder::handle_save() {
     }
     join_save(); // el hilo del clip anterior ya termino: lo juntamos
 
+    std::string why;
+    if (!ensure_out_dir(why)) {
+        fail(why);
+        return;
+    }
+
     // Todo lo que usa el hilo de guardado va copiado, porque la captura sigue
     // llenando el buffer y usando los codificadores mientras tanto.
     AVCodecParameters *vpar = avcodec_parameters_alloc();
@@ -215,28 +315,39 @@ void Recorder::handle_save() {
         fail("no se pudo guardar el clip");
         return;
     }
-    AVCodecParameters *apar = nullptr;
-    if (audio_enabled_ && audio_encoder_.is_open()) {
-        apar = avcodec_parameters_alloc();
-        if (apar && avcodec_parameters_copy(apar, audio_encoder_.codecpar()) < 0)
-            avcodec_parameters_free(&apar);
+    // Una copia de los parametros por pista de audio, con su nombre.
+    static const char *kTrackTitles[] = {"Mezcla", "Sistema", "Microfono"};
+    std::vector<AVCodecParameters *> apars;
+    std::vector<std::string> titles;
+    AVRational atb{1, 48000};
+    if (audio_enabled_) {
+        for (size_t t = 0; t < audio_encoders_.size() && t < 3; t++) {
+            AVCodecParameters *p = avcodec_parameters_alloc();
+            if (p && avcodec_parameters_copy(p, audio_encoders_[t]->codecpar()) < 0)
+                avcodec_parameters_free(&p);
+            apars.push_back(p); // nullptr = esa pista no va
+            titles.push_back(audio_encoders_.size() > 1 ? kTrackTitles[t] : "");
+            atb = audio_encoders_[t]->time_base();
+        }
     }
     const AVRational vtb = encoder_.time_base();
-    const AVRational atb = audio_encoder_.time_base();
     std::unique_ptr<ClipBuffer> snap = buffer_.snapshot();
 
-    std::string path = make_clip_path();
+    std::string path = make_clip_path(clip_game_folder());
     double secs = buffer_.buffered_seconds();
     if (secs > cfg_.clip_seconds) secs = cfg_.clip_seconds;
     log("[clip] guardando ultimos " + std::to_string((int)secs) + " s en " + path + " ...");
 
     saving_.store(true);
-    save_thread_ = std::thread([this, snap = std::move(snap), vpar, apar, vtb, atb,
+    save_thread_ = std::thread([this, snap = std::move(snap), vpar, apars, titles, vtb, atb,
                                 path]() mutable {
-        bool ok = snap->save_to(path, vpar, vtb, apar, atb);
+        std::vector<ClipBuffer::AudioTrack> tracks;
+        for (size_t t = 0; t < apars.size(); t++) tracks.push_back({apars[t], titles[t]});
+        bool ok = snap->save_to(path, vpar, vtb, tracks, atb);
         snap.reset();
         avcodec_parameters_free(&vpar);
-        if (apar) avcodec_parameters_free(&apar);
+        for (AVCodecParameters *p : apars)
+            if (p) avcodec_parameters_free(&p);
         if (ok) {
             log("[clip] listo: " + path);
             if (clip_cb_) clip_cb_(true, path);
@@ -249,26 +360,87 @@ void Recorder::handle_save() {
 }
 
 // ---------------------------------------------------------------------------
-// Vigilancia de la tecla F9 (funciona aunque el juego tenga el foco, siempre
-// que no este en pantalla completa exclusiva).
+// Atajo para guardar (F9 por defecto, configurable)
+//
+// Se usa un hook de teclado de bajo nivel: Windows nos avisa de CADA tecla que
+// se aprieta, aunque el juego tenga el foco, asi no se pierde ninguna
+// pulsacion por corta que sea (revisar la tecla cada tantos ms si podia
+// perderlas). El hook solo mira: la tecla le sigue llegando al juego.
 // ---------------------------------------------------------------------------
-void Recorder::hotkey_thread() {
-    bool prev_down = false;
-    while (!Recorder::stop_requested()) {
-        bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-        if (down && !prev_down) save_requested_.store(true);
-        prev_down = down;
-        Sleep(25);
+static std::atomic<Recorder *> g_hook_target{nullptr}; // el grabador que escucha el atajo
+
+// true si estan apretados los modificadores que pide el atajo. Si el atajo no
+// pide ninguno, vale igual (por ejemplo, F9 con Shift apretado corriendo).
+static bool hotkey_mods_down(int mods) {
+    auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    if ((mods & kModCtrl) && !down(VK_CONTROL)) return false;
+    if ((mods & kModAlt) && !down(VK_MENU)) return false;
+    if ((mods & kModShift) && !down(VK_SHIFT)) return false;
+    return true;
+}
+
+LRESULT CALLBACK Recorder::keyboard_hook(int code, WPARAM wparam, LPARAM lparam) {
+    Recorder *r = g_hook_target.load();
+    if (code == HC_ACTION && r) {
+        const KBDLLHOOKSTRUCT *k = reinterpret_cast<const KBDLLHOOKSTRUCT *>(lparam);
+        if ((int)k->vkCode == r->cfg_.hotkey_vk) {
+            bool down = (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN);
+            // Mantenerla apretada repite el "keydown": solo cuenta el primero.
+            if (down && !r->hotkey_down_ && hotkey_mods_down(r->cfg_.hotkey_mods))
+                r->save_requested_.store(true);
+            r->hotkey_down_ = down;
+        }
     }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+void Recorder::hotkey_thread() {
+    g_hook_target.store(this);
+    HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, &Recorder::keyboard_hook,
+                                   GetModuleHandleW(nullptr), 0);
+    if (!hook) log("[atajo] no se pudo instalar el hook de teclado; se revisa la tecla cada 25 ms");
+
+    bool prev_down = false;
+    DWORD last_app_check = 0;
+    while (!Recorder::stop_requested()) {
+        // Cada medio segundo, que programa tiene el foco (si no es este).
+        if (cfg_.clips_by_game && GetTickCount() - last_app_check >= 500) {
+            last_app_check = GetTickCount();
+            std::string app = foreground_app_name();
+            if (!app.empty()) {
+                std::lock_guard<std::mutex> lk(app_mutex_);
+                last_app_ = app;
+            }
+        }
+        if (hook) {
+            // Windows llama al hook mientras este hilo atiende mensajes.
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        } else { // plan B: mirar la tecla cada 25 ms
+            bool down = (GetAsyncKeyState(cfg_.hotkey_vk) & 0x8000) != 0;
+            if (down && !prev_down && hotkey_mods_down(cfg_.hotkey_mods))
+                save_requested_.store(true);
+            prev_down = down;
+            Sleep(25);
+        }
+    }
+
+    if (hook) UnhookWindowsHookEx(hook);
+    g_hook_target.store(nullptr);
 }
 
 // ---------------------------------------------------------------------------
 // Linea de estado (solo consola)
 // ---------------------------------------------------------------------------
 void Recorder::print_status(double buffer_s) {
-    fprintf(stderr, "\r[grabando] %ld frames | buffer %.0f s / %d s | F9 = guardar clip | "
+    fprintf(stderr, "\r[grabando] %ld frames | buffer %.0f s / %d s | %s = guardar clip | "
                     "Ctrl+C = salir   ",
-            frames_.load(), buffer_s, cfg_.clip_seconds);
+            frames_.load(), buffer_s, cfg_.clip_seconds,
+            hotkey_name(cfg_.hotkey_vk, cfg_.hotkey_mods).c_str());
     fflush(stderr);
 }
 
@@ -276,6 +448,11 @@ void Recorder::print_status(double buffer_s) {
 // Bucle principal
 // ---------------------------------------------------------------------------
 bool Recorder::run() {
+    // Avisamos ya si la carpeta de clips no sirve (asi no te enteras recien al
+    // apretar el atajo); igual se vuelve a intentar en cada clip.
+    std::string why;
+    if (!ensure_out_dir(why)) log("[clip] atencion: " + why);
+
     if (!ensure_capture()) {
         log("No se pudo iniciar la captura de pantalla.");
         return false;
@@ -305,6 +482,7 @@ bool Recorder::run() {
 
     start_audio();
     running_.store(true);
+    ever_ran_.store(true);
 
     hotkey_ = std::thread(&Recorder::hotkey_thread, this);
 
@@ -312,6 +490,7 @@ bool Recorder::run() {
     // empieza a codificar de una aunque la pantalla tarde en cambiar.
     start_time_us_ = now_us();
     const int64_t frame_interval_us = 1000000 / cfg_.fps;
+    int error_streak = 0; // errores de captura seguidos, sin ningun frame en el medio
 
     while (!Recorder::stop_requested()) {
         // Esperamos un frame nuevo como mucho hasta que toque el proximo: si no
@@ -323,17 +502,22 @@ bool Recorder::run() {
         }
         DxgiCapture::Result r = capture_.acquire(timeout_ms);
 
-        if (r == DxgiCapture::Result::AccessLost) {
-            log("[captura] se perdio la duplicacion, reconectando...");
-            if (!ensure_capture()) {
+        // Se perdio la captura (o fallo de otra forma, por ejemplo se reinicio
+        // el driver de video): se arma de nuevo. Solo corta si se pidio detener.
+        if (r == DxgiCapture::Result::AccessLost || r == DxgiCapture::Result::Error) {
+            log("[captura] se perdio la captura de pantalla, reconectando...");
+            // Si falla una y otra vez sin llegar a dar ni un frame, no tiene
+            // sentido seguir dando vueltas.
+            if (r == DxgiCapture::Result::Error && ++error_streak > 5) {
                 failed_.store(true);
                 break;
             }
+            if (!ensure_capture()) {
+                if (!Recorder::stop_requested()) failed_.store(true);
+                break;
+            }
+            next_frame_us_ = -1; // el ritmo de frames arranca de nuevo
             continue;
-        }
-        if (r == DxgiCapture::Result::Error) {
-            failed_.store(true);
-            break;
         }
 
         // Limite de FPS: DXGI entrega un frame por cada refresco del monitor
@@ -347,6 +531,7 @@ bool Recorder::run() {
         // (aunque se haya salteado por el limite de FPS, asi tampoco queda
         // afuera el ultimo cambio). Un frame repetido pesa casi nada.
         bool fresh = (r == DxgiCapture::Result::Frame);
+        if (fresh) error_streak = 0;
         bool repeat = !fresh && due && encoder_.is_open() && capture_.has_frame();
 
         if ((fresh && due) || repeat) {
@@ -412,7 +597,7 @@ bool Recorder::run() {
     join_save(); // si quedo un clip escribiendose, lo dejamos terminar
     timeEndPeriod(1);
     audio_capture_.close();
-    audio_encoder_.close();
+    audio_encoders_.clear();
 
     fprintf(stderr, "\n");
     if (!failed_.load() && frames_.load() == 0)

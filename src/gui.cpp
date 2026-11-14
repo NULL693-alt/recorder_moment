@@ -23,13 +23,17 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <commdlg.h>
 
 #include <d3d11.h>
 #include <dwmapi.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <cwctype>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -41,7 +45,9 @@
 #include "imgui_impl_dx11.h"
 
 #include "audio_devices.h"
+#include "clip_editor.h"
 #include "config.h"
+#include "game_detect.h"
 #include "recorder.h"
 
 // El backend de Win32 deja esta declaracion dentro de un '#if 0' (para no
@@ -70,6 +76,7 @@ enum {
     IDM_SAVE,
     IDM_OPEN,
     IDM_OPEN_LAST,
+    IDM_EDIT_LAST,
     IDM_EXIT,
 };
 
@@ -95,6 +102,9 @@ struct GuiState {
     std::thread rec_thread;
     std::atomic<bool> rec_finished{false};
     bool rec_seen_running = false;  // ya estuvo grabando (para detectar el fin)
+    bool stopping = false;          // se pidio detener; el hilo todavia esta cerrando
+    ULONGLONG restart_at = 0;       // la grabacion se corto sola: cuando reiniciarla (0 = no)
+    std::vector<ULONGLONG> restart_times; // reinicios del ultimo minuto
 
     std::mutex log_mutex;
     std::vector<std::string> log_lines;
@@ -113,10 +123,51 @@ struct GuiState {
     bool startup_enabled = false;   // "Iniciar con Windows"
     std::wstring startup_other;     // si la clave Run apunta a OTRA copia del .exe, su ruta
     std::wstring last_clip;         // ultimo clip guardado (para abrirlo desde el aviso)
+
+    std::vector<MonitorDesc> monitors; // monitores, en el orden de la captura
+    bool capturing_hotkey = false;     // esperando la tecla nueva para el atajo
+    bool capture_armed = false;        // ya se soltaron todas las teclas (empieza a escuchar)
 };
 
 static GuiState g;
 static HWND g_hwnd = nullptr;
+
+// Pestaña "Editor": un clip abierto, su vista previa y el tramo a recortar.
+struct ClipEntry {
+    std::string path;  // ruta completa (UTF-8)
+    std::string label; // nombre + tamaño, para la lista
+};
+
+struct EditorState {
+    std::vector<ClipEntry> clips;  // clips de la carpeta, el mas nuevo primero
+    bool list_dirty = true;
+    std::string listed_dir;
+    std::string path;              // clip abierto
+    std::string open_error;
+    std::string open_request;      // pedido de abrir (desde la bandeja)
+    bool auto_opened = false;      // ya se abrio solo el mas nuevo
+    bool select_tab = false;       // traer la pestaña al frente
+    bool active = false;           // la pestaña se esta viendo
+
+    ClipPlayer player;
+    ID3D11Texture2D *tex = nullptr;
+    ID3D11ShaderResourceView *srv = nullptr;
+    int tex_w = 0, tex_h = 0;
+    std::vector<uint8_t> frame;
+
+    double sel_start = 0.0, sel_end = 0.0; // tramo a guardar (segundos)
+    int drag = -1;                 // arrastrando: 0 cabezal, 1 inicio, 2 fin
+    double last_seek = -1.0;
+
+    std::thread save_thread;
+    std::atomic<bool> saving{false}, save_finished{false};
+    bool save_ok = false;
+    bool delete_after = false;     // al terminar, el original va a la Papelera
+    std::string save_msg;          // resultado del ultimo recorte
+    std::string saved_path;
+};
+
+static EditorState ed;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -168,6 +219,7 @@ static void refresh_devices() {
                                           : g.inputs[(size_t)g.mic_sel].id;
     g.outputs = list_output_devices();
     g.inputs = list_input_devices();
+    g.monitors = DxgiCapture::enumerate_monitors();
     g.out_sel = index_of_device(g.outputs, out_id);
     g.mic_sel = index_of_device(g.inputs, mic_id);
 }
@@ -177,6 +229,7 @@ static void refresh_devices() {
 // ---------------------------------------------------------------------------
 static void start_recording() {
     if (g.recorder) return;
+    g.restart_at = 0;
 
     save_config();
     Recorder::clear_stop();
@@ -205,30 +258,68 @@ static void start_recording() {
     });
 }
 
+// Solo pide detener: el hilo de grabacion cierra todo (audio, el ultimo clip
+// que se este escribiendo...) por su cuenta y reap_recorder() lo junta cuando
+// termina. Asi la ventana no se congela mientras tanto.
 static void stop_recording() {
-    if (!g.recorder) return;
+    if (!g.recorder || g.stopping) return;
     Recorder::request_stop();
-    if (g.rec_thread.joinable()) g.rec_thread.join();
-    g.recorder.reset();
-    g.rec_finished.store(false);
-    g.rec_seen_running = false;
-    Recorder::clear_stop();
+    g.stopping = true;
 }
 
-// Se llama cada vuelta: si el hilo de grabacion termino solo (error o parada),
-// lo junta y limpia.
+// Se llama cada vuelta: si el hilo de grabacion termino (error o parada), lo
+// junta y limpia.
+//
+// Si se corto sola (nadie apreto "Detener"), avisa con el cartel rojo y, si
+// venia grabando, la vuelve a arrancar a los 2 s. Para no quedar dando vueltas
+// con algo que no tiene arreglo, se rinde al tercer corte en un minuto.
+static void show_toast(bool ok, const std::wstring &title, const std::wstring &text);
+
+static void gui_log(const std::string &m) {
+    std::lock_guard<std::mutex> lk(g.log_mutex);
+    g.log_lines.push_back(m);
+    g.log_version.fetch_add(1);
+}
+
 static void reap_recorder() {
-    if (!g.recorder) return;
+    if (!g.recorder) {
+        if (g.restart_at && GetTickCount64() >= g.restart_at) start_recording();
+        return;
+    }
     if (!g.rec_finished.load()) return;
     if (g.rec_thread.joinable()) g.rec_thread.join();
+    const bool on_its_own = !g.stopping && !g.want_quit;
+    const bool was_recording = g.recorder->ever_ran();
     g.recorder.reset();
     g.rec_finished.store(false);
     g.rec_seen_running = false;
+    g.stopping = false;
     Recorder::clear_stop();
+    if (!on_its_own) return;
+
+    const ULONGLONG now = GetTickCount64();
+    while (!g.restart_times.empty() && now - g.restart_times.front() > 60000)
+        g.restart_times.erase(g.restart_times.begin());
+    if (g.cfg.clip_sound) MessageBeep(MB_ICONHAND);
+    if (was_recording && g.restart_times.size() < 3) {
+        g.restart_times.push_back(now);
+        g.restart_at = now + 2000;
+        gui_log("[grabador] la grabacion se corto sola: se reinicia en 2 s");
+        show_toast(false, L"La grabacion se corto", L"Se reinicia sola en un momento...");
+    } else {
+        gui_log(was_recording
+                    ? "[grabador] la grabacion se corto varias veces seguidas: queda detenida"
+                    : "[grabador] no se pudo iniciar la grabacion (mira los mensajes de arriba)");
+        show_toast(false, was_recording ? L"La grabacion se detuvo" : L"No se pudo iniciar la grabacion",
+                   L"Abri recorder_moment para ver que paso");
+    }
 }
 
+// true mientras graba de verdad (ni arrancando ni deteniendose).
+static bool is_recording() { return g.recorder && !g.rec_finished.load() && !g.stopping; }
+
 static void request_save_clip() {
-    if (g.recorder && !g.rec_finished.load()) g.recorder->request_save();
+    if (is_recording()) g.recorder->request_save();
 }
 
 // Icono de la aplicacion (el del .rc), o el generico de Windows si falta.
@@ -276,12 +367,19 @@ static std::wstring startup_stored_path() {
     RegCloseKey(key);
     if (r != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return std::wstring();
 
+    // Lo guardamos como "C:\ruta\recorder.exe" --startup: nos quedamos con la
+    // ruta de adentro de las comillas.
     std::wstring stored(buf);
-    // Le sacamos las comillas con las que lo guardamos.
-    if (stored.size() >= 2 && stored.front() == L'"' && stored.back() == L'"')
-        stored = stored.substr(1, stored.size() - 2);
+    if (!stored.empty() && stored.front() == L'"') {
+        size_t close = stored.find(L'"', 1);
+        stored = stored.substr(1, close == std::wstring::npos ? std::wstring::npos : close - 1);
+    }
     return stored;
 }
+
+// Valor de la clave Run para este .exe: la ruta entre comillas (por si tiene
+// espacios) y --startup para saber que lo abrio Windows.
+static std::wstring startup_value() { return L"\"" + exe_path() + L"\" --startup"; }
 
 // true si la clave Run ya apunta a este mismo .exe. Si apunta a otra copia (por
 // ejemplo, la de dist\ mientras corres la de build\), la casilla sale
@@ -308,10 +406,8 @@ static bool set_startup_registered(bool enabled) {
 
     bool ok = false;
     if (enabled) {
-        std::wstring path = exe_path();
-        if (!path.empty()) {
-            // Entre comillas, por si la ruta tiene espacios.
-            std::wstring value = L"\"" + path + L"\"";
+        if (!exe_path().empty()) {
+            std::wstring value = startup_value();
             LONG r = RegSetValueExW(key, RUN_VALUE, 0, REG_SZ, (const BYTE *)value.c_str(),
                                     (DWORD)((value.size() + 1) * sizeof(wchar_t)));
             ok = (r == ERROR_SUCCESS);
@@ -482,6 +578,7 @@ static void notify_clip(bool ok, const std::string &msg) {
     if (g.cfg.clip_sound) MessageBeep(ok ? MB_OK : MB_ICONHAND);
 
     if (ok) {
+        ed.list_dirty = true; // que aparezca en la lista del editor
         g.last_clip = utf8_to_wide(msg);
         size_t slash = g.last_clip.find_last_of(L"\\/");
         show_toast(true, L"Clip guardado",
@@ -512,19 +609,22 @@ static void tray_menu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
 
-    bool running = g.recorder && !g.rec_finished.load();
+    bool running = is_recording();
 
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_SHOW, L"Mostrar ventana");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, IDM_STARTSTOP,
-                running ? L"Detener grabacion" : L"Iniciar grabacion");
+    AppendMenuW(menu, MF_STRING | (g.stopping ? MF_GRAYED : 0u), IDM_STARTSTOP,
+                g.stopping ? L"Deteniendo..."
+                           : (g.recorder ? L"Detener grabacion" : L"Iniciar grabacion"));
     AppendMenuW(menu, MF_STRING | (running ? 0u : MF_GRAYED), IDM_SAVE,
                 L"Guardar clip");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_OPEN, L"Abrir carpeta de clips");
     AppendMenuW(menu, MF_STRING | (g.last_clip.empty() ? MF_GRAYED : 0u), IDM_OPEN_LAST,
                 L"Mostrar el ultimo clip");
+    AppendMenuW(menu, MF_STRING | (g.last_clip.empty() ? MF_GRAYED : 0u), IDM_EDIT_LAST,
+                L"Recortar el ultimo clip");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Salir");
 
@@ -540,7 +640,7 @@ static void tray_command(HWND hwnd, int id) {
             show_window(hwnd);
             break;
         case IDM_STARTSTOP:
-            if (g.recorder && !g.rec_finished.load())
+            if (g.recorder)
                 stop_recording();
             else
                 start_recording();
@@ -553,6 +653,13 @@ static void tray_command(HWND hwnd, int id) {
             break;
         case IDM_OPEN_LAST:
             open_last_clip();
+            break;
+        case IDM_EDIT_LAST:
+            if (!g.last_clip.empty()) {
+                ed.open_request = wide_to_utf8(g.last_clip.c_str());
+                ed.select_tab = true;
+                show_window(hwnd);
+            }
             break;
         case IDM_EXIT:
             g.want_quit = true;
@@ -777,6 +884,99 @@ static void draw_codec_combo() {
     }
 }
 
+// Monitor a grabar, por nombre (en el mismo orden en que lo busca la captura).
+static void draw_monitor_combo() {
+    ImGui::Text("Monitor");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (g.monitors.empty()) { // no se pudieron listar: queda el numero
+        ImGui::SliderInt("##monitor", &g.cfg.monitor, 0, 7);
+        return;
+    }
+    auto label = [](int i) {
+        const MonitorDesc &m = g.monitors[(size_t)i];
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%d: %s (%dx%d%s)", i + 1, m.name.c_str(), m.width, m.height,
+                 m.primary ? ", principal" : "");
+        return std::string(buf);
+    };
+    int cur = g.cfg.monitor;
+    std::string preview = (cur >= 0 && cur < (int)g.monitors.size())
+                              ? label(cur)
+                              : "Monitor " + std::to_string(cur + 1) + " (no conectado)";
+    if (ImGui::BeginCombo("##monitor_combo", preview.c_str())) {
+        for (int i = 0; i < (int)g.monitors.size(); i++) {
+            bool selected = (i == cur);
+            if (ImGui::Selectable(label(i).c_str(), selected)) g.cfg.monitor = i;
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+}
+
+// Teclas que no sirven solas como atajo: botones del mouse y modificadores.
+static bool is_modifier_or_mouse(int vk) {
+    switch (vk) {
+        case VK_LBUTTON: case VK_RBUTTON: case VK_CANCEL: case VK_MBUTTON:
+        case VK_XBUTTON1: case VK_XBUTTON2:
+        case VK_SHIFT: case VK_CONTROL: case VK_MENU:
+        case VK_LSHIFT: case VK_RSHIFT: case VK_LCONTROL: case VK_RCONTROL:
+        case VK_LMENU: case VK_RMENU: case VK_LWIN: case VK_RWIN:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Atajo para guardar clip. Al tocar "Cambiar" se espera la proxima tecla (con
+// Ctrl/Alt/Shift si estan apretados); Esc cancela.
+static void draw_hotkey_setting() {
+    ImGui::Text("Atajo para guardar un clip");
+    if (!g.capturing_hotkey) {
+        std::string name = hotkey_name(g.cfg.hotkey_vk, g.cfg.hotkey_mods);
+        ImGui::SetNextItemWidth(-120.0f);
+        ImGui::InputText("##hotkey", &name[0], name.size() + 1, ImGuiInputTextFlags_ReadOnly);
+        ImGui::SameLine();
+        if (ImGui::Button("Cambiar", ImVec2(110, 0))) {
+            g.capturing_hotkey = true;
+            g.capture_armed = false; // primero hay que soltar todo (el clic incluido)
+        }
+        return;
+    }
+
+    ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),
+                       "Apreta la tecla o combinacion (Esc para cancelar)...");
+    bool any_down = false;
+    for (int vk = 0x08; vk <= 0xFE; vk++) {
+        if (is_modifier_or_mouse(vk) || !(GetAsyncKeyState(vk) & 0x8000)) continue;
+        any_down = true;
+        if (!g.capture_armed) break;
+        if (vk != VK_ESCAPE) {
+            int mods = 0;
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= kModCtrl;
+            if (GetAsyncKeyState(VK_MENU) & 0x8000) mods |= kModAlt;
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mods |= kModShift;
+            g.cfg.hotkey_vk = vk;
+            g.cfg.hotkey_mods = mods;
+        }
+        g.capturing_hotkey = false;
+        break;
+    }
+    if (!any_down) g.capture_armed = true;
+}
+
+// Pistas de audio: la mezcla siempre; sistema y microfono aparte si se pide.
+static void draw_audio_tracks_setting() {
+    ImGui::Checkbox("Guardar tambien el sistema y el microfono en pistas separadas",
+                    &g.cfg.separate_audio_tracks);
+    if (g.cfg.separate_audio_tracks) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::TextWrapped("El clip lleva 3 pistas: la mezcla (la que suena en cualquier "
+                           "reproductor), solo el sistema y solo el microfono. Sirve para "
+                           "editar (DaVinci, Premiere, CapCut...) y subir o bajar tu voz.");
+        ImGui::PopStyleColor();
+    }
+}
+
 static void draw_settings(bool running) {
     ImGui::SeparatorText("Ajustes");
 
@@ -803,13 +1003,14 @@ static void draw_settings(bool running) {
             CoTaskMemFree(pidl);
         }
     }
-    ImGui::TextDisabled("Carpeta donde se guardan los clips");
+    ImGui::TextDisabled("Carpeta donde se guardan los clips (si no existe, se crea)");
+    ImGui::Checkbox("Una carpeta por juego", &g.cfg.clips_by_game);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Cada clip va a una subcarpeta con el nombre del juego que tenia el "
+                          "foco al guardarlo (por ejemplo \"VALORANT\").");
 
-    int monitors = GetSystemMetrics(SM_CMONITORS);
-    if (monitors < 1) monitors = 1;
-    ImGui::Text("Monitor");
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::SliderInt("##monitor", &g.cfg.monitor, 0, monitors - 1);
+    draw_hotkey_setting();
+    draw_monitor_combo();
 
     ImGui::Text("Cuadros por segundo (FPS)");
     ImGui::SetNextItemWidth(-1.0f);
@@ -842,12 +1043,14 @@ static void draw_settings(bool running) {
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::SliderInt("##audiobitrate", &g.cfg.audio_kbps, 64, 320, "%d kbps",
                      ImGuiSliderFlags_AlwaysClamp);
+    ImGui::BeginDisabled(!g.cfg.mic_enabled);
+    draw_audio_tracks_setting();
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
 
-    if (ImGui::Button("Refrescar dispositivos")) refresh_devices();
+    if (ImGui::Button("Refrescar dispositivos y monitores")) refresh_devices();
 
     ImGui::Checkbox("Grabar el cursor del mouse", &g.cfg.record_cursor);
-    ImGui::Checkbox("Minimizar a la bandeja al cerrar", &g.cfg.minimize_to_tray);
 
     ImGui::EndDisabled();
 
@@ -856,6 +1059,8 @@ static void draw_settings(bool running) {
 
     ImGui::Spacing();
     ImGui::SeparatorText("Arranque");
+    ImGui::Checkbox("Empezar a grabar al abrir el programa", &g.cfg.record_on_start);
+    ImGui::Checkbox("Minimizar a la bandeja al cerrar", &g.cfg.minimize_to_tray);
     if (ImGui::Checkbox("Iniciar con Windows", &g.startup_enabled)) {
         // Mostramos siempre el estado real de la clave (por si Windows rechazo
         // el cambio).
@@ -863,8 +1068,10 @@ static void draw_settings(bool running) {
         refresh_startup_state();
     }
     if (g.startup_enabled) {
-        ImGui::TextDisabled("Se abre solo al encender la PC (marca \"Minimizar a la bandeja\""
-                            " para que arranque escondido)");
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::TextWrapped("Se abre solo al encender la PC. Si \"Minimizar a la bandeja\" "
+                           "esta marcado, arranca escondido junto al reloj.");
+        ImGui::PopStyleColor();
     } else if (!g.startup_other.empty()) {
         std::string other = wide_to_utf8(g.startup_other.c_str());
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
@@ -875,20 +1082,31 @@ static void draw_settings(bool running) {
     }
 }
 
-static void draw_controls(bool running) {
+static void draw_controls() {
     ImGui::SeparatorText("Grabacion");
 
-    if (!running) {
+    const std::string key = hotkey_name(g.cfg.hotkey_vk, g.cfg.hotkey_mods);
+    const std::string save_label = "Guardar clip (" + key + ")";
+
+    if (!g.recorder) {
         if (ImGui::Button("Iniciar grabacion", ImVec2(180, 34))) start_recording();
+        if (g.restart_at) {
+            ImGui::SameLine();
+            if (ImGui::Button("Cancelar reinicio", ImVec2(160, 34))) g.restart_at = 0;
+        }
     } else {
+        ImGui::BeginDisabled(g.stopping);
         if (ImGui::Button("Detener", ImVec2(110, 34))) stop_recording();
         ImGui::SameLine();
-        if (ImGui::Button("Guardar clip (F9)", ImVec2(180, 34))) request_save_clip();
+        if (ImGui::Button(save_label.c_str(), ImVec2(220, 34))) request_save_clip();
+        ImGui::EndDisabled();
     }
 
     ImGui::Spacing();
 
-    if (running && g.recorder) {
+    if (g.stopping) {
+        ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f), "Deteniendo...");
+    } else if (g.recorder && g.recorder->is_running()) {
         long frames = g.recorder->frames();
         double buffered = g.recorder->buffered_seconds();
         double pct = g.cfg.clip_seconds > 0 ? buffered / (double)g.cfg.clip_seconds : 0.0;
@@ -898,10 +1116,13 @@ static void draw_controls(bool running) {
         ImGui::Text("Frames: %ld", frames);
         ImGui::Text("Buffer: %.0f s / %d s", buffered, g.cfg.clip_seconds);
         ImGui::ProgressBar((float)pct, ImVec2(-1.0f, 0.0f));
-        ImGui::TextDisabled("Apreta F9 (o Guardar clip) para guardar los ultimos %d s",
-                            g.cfg.clip_seconds);
+        ImGui::TextDisabled("Apreta %s (o Guardar clip) para guardar los ultimos %d s",
+                            key.c_str(), g.cfg.clip_seconds);
     } else if (g.recorder) {
         ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f), "Iniciando...");
+    } else if (g.restart_at) {
+        ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.3f, 1.0f),
+                           "La grabacion se corto sola: reiniciando...");
     } else {
         ImGui::TextDisabled("Detenido");
     }
@@ -925,8 +1146,468 @@ static void draw_log() {
     ImGui::EndChild();
 }
 
+// ---------------------------------------------------------------------------
+// Editor de clips: elegir un clip, verlo, marcar inicio/fin y guardar el pedazo
+// (sin recodificar, ver clip_editor.h).
+// ---------------------------------------------------------------------------
+static constexpr double kMinTrim = 0.5; // el recorte mas corto (segundos)
+
+static std::string file_name_of(const std::string &path) {
+    size_t slash = path.find_last_of("\\/");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// "1:05.3"
+static std::string fmt_time(double t) {
+    if (t < 0) t = 0;
+    int tenths = (int)std::llround(t * 10.0);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%d:%02d.%d", tenths / 600, (tenths / 10) % 60, tenths % 10);
+    return buf;
+}
+
+static void editor_release_texture() {
+    if (ed.srv) { ed.srv->Release(); ed.srv = nullptr; }
+    if (ed.tex) { ed.tex->Release(); ed.tex = nullptr; }
+    ed.tex_w = ed.tex_h = 0;
+}
+
+// Sube el ultimo cuadro del reproductor a la textura que dibuja ImGui.
+static void editor_upload_frame() {
+    int w = 0, h = 0;
+    if (!ed.player.take_frame(ed.frame, w, h)) return;
+    if (!ed.tex || w != ed.tex_w || h != ed.tex_h) {
+        editor_release_texture();
+        D3D11_TEXTURE2D_DESC td;
+        ZeroMemory(&td, sizeof(td));
+        td.Width = (UINT)w;
+        td.Height = (UINT)h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DYNAMIC;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(g_d3dDevice->CreateTexture2D(&td, nullptr, &ed.tex))) return;
+        if (FAILED(g_d3dDevice->CreateShaderResourceView(ed.tex, nullptr, &ed.srv))) {
+            editor_release_texture();
+            return;
+        }
+        ed.tex_w = w;
+        ed.tex_h = h;
+    }
+    D3D11_MAPPED_SUBRESOURCE ms;
+    if (SUCCEEDED(g_d3dContext->Map(ed.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+        for (int y = 0; y < h; y++)
+            memcpy((uint8_t *)ms.pData + (size_t)y * ms.RowPitch,
+                   ed.frame.data() + (size_t)y * w * 4, (size_t)w * 4);
+        g_d3dContext->Unmap(ed.tex, 0);
+    }
+}
+
+// Lista los .mp4 de la carpeta de clips, el mas nuevo primero.
+static void editor_refresh_list() {
+    namespace fs = std::filesystem;
+    ed.list_dirty = false;
+    ed.listed_dir = g.out_dir_buf;
+    ed.clips.clear();
+
+    struct Item {
+        fs::file_time_type when;
+        ClipEntry e;
+    };
+    std::vector<Item> items;
+    std::error_code ec;
+    // Tambien las subcarpetas (una por juego, y "Clips Edit\<juego>").
+    fs::path dir = fs::u8path(ed.listed_dir.empty() ? "." : ed.listed_dir);
+    for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec),
+         end;
+         !ec && it != end; it.increment(ec)) {
+        if (it.depth() >= 2) it.disable_recursion_pending();
+        if (!it->is_regular_file(ec)) continue;
+        std::string ext = it->path().extension().u8string();
+        for (char &c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext != ".mp4") continue;
+        Item item;
+        item.when = it->last_write_time(ec);
+        item.e.path = it->path().u8string();
+        double mb = (double)it->file_size(ec) / (1024.0 * 1024.0);
+        char size[32];
+        std::snprintf(size, sizeof(size), "  (%.1f MB)", mb);
+        // "VALORANT / clip_....mp4  (12.3 MB)"
+        std::string folder = it->path().parent_path().lexically_relative(dir).u8string();
+        for (char &c : folder)
+            if (c == '\\') c = '/';
+        if (folder == ".") folder.clear();
+        item.e.label = (folder.empty() ? "" : folder + " / ") +
+                       it->path().filename().u8string() + size;
+        items.push_back(std::move(item));
+    }
+    std::sort(items.begin(), items.end(),
+              [](const Item &a, const Item &b) { return a.when > b.when; });
+    for (Item &i : items) ed.clips.push_back(std::move(i.e));
+}
+
+static void editor_open(const std::string &path) {
+    ed.player.close();
+    editor_release_texture();
+    ed.path = path;
+    ed.open_error.clear();
+    ed.drag = -1;
+    std::string err;
+    if (!ed.player.open(path, 1280, 720, &err)) {
+        ed.open_error = err;
+        return;
+    }
+    ed.sel_start = 0.0;
+    ed.sel_end = ed.player.info().duration;
+}
+
+static std::string pick_clip_file() {
+    wchar_t buf[2048] = L"";
+    std::wstring dir = utf8_to_wide(g.out_dir_buf);
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = L"Videos MP4 (*.mp4)\0*.mp4\0Todos los archivos\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+    ofn.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
+    ofn.lpstrTitle = L"Elegi el clip a recortar";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&ofn)) return std::string();
+    return wide_to_utf8(buf);
+}
+
+static void editor_mark_start() {
+    double t = keyframe_at_or_before(ed.player.info(), ed.player.position());
+    ed.sel_start = t;
+    if (ed.sel_end < ed.sel_start + kMinTrim) ed.sel_end = ed.player.info().duration;
+}
+
+static void editor_mark_end() {
+    double t = ed.player.position();
+    if (t < ed.sel_start + kMinTrim) return; // antes del inicio: no tiene sentido
+    ed.sel_end = t;
+}
+
+static void editor_toggle_play() {
+    if (ed.player.playing())
+        ed.player.pause();
+    else
+        ed.player.play();
+}
+
+static void editor_start_save() {
+    if (ed.saving.load() || ed.path.empty()) return;
+    if (ed.save_thread.joinable()) ed.save_thread.join();
+    ed.player.pause();
+    ed.saving.store(true);
+    ed.save_finished.store(false);
+    ed.save_msg.clear();
+    std::string in = ed.path;
+    std::string out = edited_clip_path(in, g.out_dir_buf); // carpeta "Clips Edit"
+    double s = ed.sel_start, e = ed.sel_end;
+    ed.delete_after = g.cfg.trim_delete_original;
+    ed.save_thread = std::thread([in, out, s, e]() {
+        std::string err;
+        double dur = 0;
+        bool ok = trim_clip(in, out, s, e, &err, &dur);
+        ed.save_ok = ok;
+        if (ok) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), " (%.1f s)", dur);
+            ed.save_msg = "Guardado: " + file_name_of(out) + buf;
+            ed.saved_path = out;
+        } else {
+            ed.save_msg = "No se pudo recortar: " + err;
+        }
+        ed.save_finished.store(true);
+    });
+}
+
+// Manda un archivo a la Papelera (se puede recuperar desde ahi).
+static bool recycle_file(const std::string &path) {
+    std::error_code ec;
+    std::wstring w = std::filesystem::absolute(std::filesystem::u8path(path), ec).wstring();
+    w.push_back(L'\0'); // la lista termina con doble \0
+    SHFILEOPSTRUCTW op;
+    ZeroMemory(&op, sizeof(op));
+    op.hwnd = g_hwnd;
+    op.wFunc = FO_DELETE;
+    op.pFrom = w.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted &&
+           !std::filesystem::exists(std::filesystem::u8path(path), ec);
+}
+
+// Termino el hilo de guardado: lo juntamos, borramos el original si hay que
+// hacerlo, y abrimos el recorte.
+static void editor_poll_save() {
+    if (!ed.save_finished.load()) return;
+    if (ed.save_thread.joinable()) ed.save_thread.join();
+    ed.save_finished.store(false);
+    ed.saving.store(false);
+    ed.list_dirty = true;
+    if (ed.save_ok) {
+        std::string original = ed.path;
+        if (ed.delete_after) {
+            ed.player.close(); // suelta el archivo, si no Windows no deja borrarlo
+            if (recycle_file(original)) {
+                ed.save_msg += "  -  el original se mando a la Papelera";
+                if (same_path(g.last_clip, utf8_to_wide(original)))
+                    g.last_clip = utf8_to_wide(ed.saved_path);
+            }
+            else
+                ed.save_msg += "  -  no se pudo borrar el original";
+        }
+        editor_open(ed.saved_path); // queda abierto el recorte
+        if (g.cfg.clip_sound) MessageBeep(MB_OK);
+    } else if (g.cfg.clip_sound) {
+        MessageBeep(MB_ICONHAND);
+    }
+}
+
+// Linea de tiempo: el tramo elegido en azul, los cuadros clave como rayitas
+// abajo, el cabezal en blanco. Se hace clic/arrastra para moverse y se agarran
+// los bordes del tramo para cambiar inicio y fin.
+static void draw_timeline(double dur) {
+    const float s = ImGui::GetStyle().FontScaleDpi;
+    const float h = ImGui::GetFrameHeight() * 1.8f;
+    const float w = std::max(50.0f, ImGui::GetContentRegionAvail().x);
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1(p0.x + w, p0.y + h);
+    ImGui::InvisibleButton("##timeline", ImVec2(w, h));
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImGuiIO &io = ImGui::GetIO();
+
+    auto x_of = [&](double t) { return p0.x + (float)(dur > 0 ? t / dur : 0.0) * w; };
+    auto t_of = [&](float x) {
+        double f = (x - p0.x) / w;
+        f = f < 0 ? 0 : (f > 1 ? 1 : f);
+        return f * dur;
+    };
+
+    const float grab = 8.0f * s;
+    float xs = x_of(ed.sel_start), xe = x_of(ed.sel_end);
+
+    // Interaccion.
+    if (ImGui::IsItemActivated()) {
+        float mx = io.MousePos.x;
+        if (std::fabs(mx - xe) <= grab && std::fabs(mx - xe) <= std::fabs(mx - xs))
+            ed.drag = 2;
+        else if (std::fabs(mx - xs) <= grab)
+            ed.drag = 1;
+        else
+            ed.drag = 0;
+        ed.last_seek = -1.0;
+        ed.player.pause();
+    }
+    if (ImGui::IsItemActive() && ed.drag >= 0) {
+        double t = t_of(io.MousePos.x);
+        if (ed.drag == 1) {
+            ed.sel_start = std::max(0.0, std::min(t, ed.sel_end - kMinTrim));
+            t = ed.sel_start;
+        } else if (ed.drag == 2) {
+            ed.sel_end = std::min(dur, std::max(t, ed.sel_start + kMinTrim));
+            t = ed.sel_end;
+        }
+        if (std::fabs(t - ed.last_seek) > 1e-3) {
+            ed.player.seek(t);
+            ed.last_seek = t;
+        }
+    }
+    if (ImGui::IsItemDeactivated()) {
+        if (ed.drag == 1) { // el inicio va al cuadro clave
+            ed.sel_start = keyframe_at_or_before(ed.player.info(), ed.sel_start);
+            ed.player.seek(ed.sel_start);
+        }
+        ed.drag = -1;
+    }
+    if (ImGui::IsItemHovered()) {
+        float mx = io.MousePos.x;
+        if (std::fabs(mx - xs) <= grab || std::fabs(mx - xe) <= grab)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        ImGui::SetTooltip("%s", fmt_time(t_of(mx)).c_str());
+    }
+
+    // Dibujo.
+    xs = x_of(ed.sel_start);
+    xe = x_of(ed.sel_end);
+    const float r = 4.0f * s;
+    dl->AddRectFilled(p0, p1, IM_COL32(38, 38, 46, 255), r);
+    dl->AddRectFilled(ImVec2(xs, p0.y), ImVec2(xe, p1.y), IM_COL32(66, 150, 250, 85));
+    for (double k : ed.player.info().keyframes) {
+        float x = x_of(k);
+        dl->AddLine(ImVec2(x, p1.y - h * 0.22f), ImVec2(x, p1.y), IM_COL32(160, 160, 170, 110));
+    }
+    const float hw = 3.0f * s;
+    dl->AddRectFilled(ImVec2(xs - hw, p0.y), ImVec2(xs + hw, p1.y), IM_COL32(46, 204, 113, 255),
+                      2.0f * s);
+    dl->AddRectFilled(ImVec2(xe - hw, p0.y), ImVec2(xe + hw, p1.y), IM_COL32(231, 76, 60, 255),
+                      2.0f * s);
+    float xp = x_of(ed.player.position());
+    dl->AddLine(ImVec2(xp, p0.y - 3.0f * s), ImVec2(xp, p1.y + 3.0f * s),
+                IM_COL32(255, 255, 255, 255), 2.0f * s);
+}
+
+static void draw_editor() {
+    editor_poll_save();
+    if (ed.list_dirty || ed.listed_dir != g.out_dir_buf) editor_refresh_list();
+    if (!ed.open_request.empty()) {
+        std::string req;
+        req.swap(ed.open_request);
+        editor_open(req);
+        ed.auto_opened = true;
+    } else if (!ed.auto_opened && !ed.player.is_open() && !ed.clips.empty()) {
+        editor_open(ed.clips[0].path); // de entrada, el clip mas nuevo
+        ed.auto_opened = true;
+    }
+
+    const float s = ImGui::GetStyle().FontScaleDpi;
+    ImGuiStyle &style = ImGui::GetStyle();
+
+    // --- Que clip ---
+    ImGui::SeparatorText("Clip");
+    const float bw_refresh = ImGui::CalcTextSize("Refrescar").x + style.FramePadding.x * 2;
+    const float bw_open = ImGui::CalcTextSize("Abrir otro...").x + style.FramePadding.x * 2;
+    ImGui::SetNextItemWidth(-(bw_refresh + bw_open + style.ItemSpacing.x * 2));
+    std::string current = ed.path.empty() ? "(ningun clip)" : file_name_of(ed.path);
+    if (ImGui::BeginCombo("##clip", current.c_str())) {
+        for (const ClipEntry &c : ed.clips) {
+            if (ImGui::Selectable(c.label.c_str(), c.path == ed.path)) editor_open(c.path);
+        }
+        if (ed.clips.empty()) ImGui::TextDisabled("No hay clips en la carpeta");
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refrescar")) ed.list_dirty = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Abrir otro...")) {
+        std::string p = pick_clip_file();
+        if (!p.empty()) editor_open(p);
+    }
+    if (ed.clips.empty() && ed.path.empty())
+        ImGui::TextDisabled("Todavia no hay clips en %s", ed.listed_dir.c_str());
+    if (!ed.open_error.empty())
+        ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "%s", ed.open_error.c_str());
+    if (!ed.player.is_open()) return;
+
+    editor_upload_frame();
+    const ClipInfo &info = ed.player.info();
+    const double dur = info.duration;
+
+    // --- Vista previa ---
+    // Lo que queda debajo (linea de tiempo, botones y el recorte) mide unas 9
+    // lineas; el video usa el resto, sin deformarse.
+    const float line = ImGui::GetFrameHeightWithSpacing();
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    const float max_h = std::max(120.0f * s, ImGui::GetContentRegionAvail().y - line * 9.5f);
+    const float aspect = info.height > 0 ? info.width / (float)info.height : 16.0f / 9.0f;
+    float pw = avail_w, ph = pw / aspect;
+    if (ph > max_h) {
+        ph = max_h;
+        pw = ph * aspect;
+    }
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail_w - pw) * 0.5f);
+    if (ed.srv) {
+        ImGui::Image((ImTextureID)(intptr_t)ed.srv, ImVec2(pw, ph));
+        if (ImGui::IsItemClicked()) editor_toggle_play();
+    } else {
+        ImGui::Dummy(ImVec2(pw, ph));
+    }
+
+    // --- Linea de tiempo ---
+    draw_timeline(dur);
+    ImGui::Text("%s / %s", fmt_time(ed.player.position()).c_str(), fmt_time(dur).c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("  %dx%d, %.0f fps, %s%s", info.width, info.height, info.fps,
+                        info.video_codec.c_str(),
+                        info.audio_tracks == 0       ? ", sin audio"
+                        : ed.player.has_audio()      ? ""
+                                                     : ", sin salida de audio");
+
+    // --- Controles ---
+    const bool playing = ed.player.playing();
+    if (ImGui::Button(playing ? "Pausa" : "Reproducir", ImVec2(100 * s, 0))) editor_toggle_play();
+    ImGui::SameLine();
+    if (ImGui::Button("-5 s")) ed.player.seek(ed.player.position() - 5.0);
+    ImGui::SameLine();
+    if (ImGui::Button("+5 s")) ed.player.seek(ed.player.position() + 5.0);
+    ImGui::SameLine();
+    if (ImGui::Button("Marcar inicio (I)")) editor_mark_start();
+    ImGui::SameLine();
+    if (ImGui::Button("Marcar fin (O)")) editor_mark_end();
+    ImGui::TextDisabled("Espacio: reproducir/pausa   Flechas: 1 s   Clic en el video: pausa");
+
+    // --- Recorte ---
+    ImGui::SeparatorText("Recorte");
+    ImGui::Text("Desde %s hasta %s  (%.1f s de %.1f s)", fmt_time(ed.sel_start).c_str(),
+                fmt_time(ed.sel_end).c_str(), ed.sel_end - ed.sel_start, dur);
+    if (ImGui::Button("Ver el recorte")) ed.player.play_range(ed.sel_start, ed.sel_end);
+    ImGui::SameLine();
+    if (ImGui::Button("Todo el clip")) {
+        ed.sel_start = 0.0;
+        ed.sel_end = dur;
+    }
+    ImGui::SameLine();
+    const bool saving = ed.saving.load();
+    ImGui::BeginDisabled(saving);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.32f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.65f, 0.38f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.48f, 0.28f, 1.0f));
+    if (ImGui::Button(saving ? "Guardando..." : "Guardar recorte")) editor_start_save();
+    ImGui::PopStyleColor(3);
+    ImGui::EndDisabled();
+
+    if (!ed.save_msg.empty() && !saving) {
+        ImGui::TextColored(ed.save_ok ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                                      : ImVec4(0.95f, 0.4f, 0.35f, 1.0f),
+                           "%s", ed.save_msg.c_str());
+        if (ed.save_ok) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Abrir")) {
+                std::wstring w = utf8_to_wide(ed.saved_path);
+                ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Mostrar en la carpeta")) {
+                std::error_code ec;
+                std::wstring w =
+                    std::filesystem::absolute(std::filesystem::u8path(ed.saved_path), ec).wstring();
+                std::wstring args = L"/select,\"" + w + L"\"";
+                ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr,
+                              SW_SHOWNORMAL);
+            }
+        }
+    }
+    if (ImGui::Checkbox("Borrar el clip original al guardar (va a la Papelera)",
+                        &g.cfg.trim_delete_original))
+        save_config();
+    ImGui::PushStyleColor(ImGuiCol_Text, style.Colors[ImGuiCol_TextDisabled]);
+    ImGui::TextWrapped("El recorte se guarda en la carpeta \"%s\" (dentro de la carpeta de "
+                       "clips, separado por juego). El inicio cae en un cuadro clave (hay uno "
+                       "cada 2 s): asi el corte es instantaneo y sin perder calidad.",
+                       kEditedFolder);
+    ImGui::PopStyleColor();
+
+    // --- Teclado ---
+    ImGuiIO &io = ImGui::GetIO();
+    if (!io.WantTextInput && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) editor_toggle_play();
+        if (ImGui::IsKeyPressed(ImGuiKey_I, false)) editor_mark_start();
+        if (ImGui::IsKeyPressed(ImGuiKey_O, false)) editor_mark_end();
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) ed.player.seek(ed.player.position() - 1.0);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) ed.player.seek(ed.player.position() + 1.0);
+    }
+}
+
 static void draw_ui() {
-    bool running = g.recorder && !g.rec_finished.load();
+    // Los ajustes se bloquean mientras haya un grabador (arrancando, grabando
+    // o deteniendose): se leen al iniciar.
+    bool busy = g.recorder != nullptr;
 
     const ImGuiViewport *vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -935,26 +1616,50 @@ static void draw_ui() {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
 
-    draw_controls(running);
-    ImGui::Spacing();
-    draw_settings(running);
-    ImGui::Spacing();
-    draw_log();
-
+    bool editor_active = false;
+    if (ImGui::BeginTabBar("##tabs")) {
+        if (ImGui::BeginTabItem("Grabar")) {
+            draw_controls();
+            ImGui::Spacing();
+            draw_settings(busy);
+            ImGui::Spacing();
+            draw_log();
+            ImGui::EndTabItem();
+        }
+        ImGuiTabItemFlags flags = ed.select_tab ? ImGuiTabItemFlags_SetSelected : 0;
+        ed.select_tab = false;
+        if (ImGui::BeginTabItem("Recortar clips", nullptr, flags)) {
+            editor_active = true;
+            draw_editor();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     ImGui::End();
+
+    // Fuera del editor no sigue sonando. Y en el editor, Espacio es
+    // reproducir/pausa (no "apretar el boton que tiene el foco").
+    if (ed.active && !editor_active) ed.player.pause();
+    ed.active = editor_active;
+    ImGuiIO &io = ImGui::GetIO();
+    if (editor_active)
+        io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+    else
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 }
 
 // ---------------------------------------------------------------------------
 // Arranque
 // ---------------------------------------------------------------------------
-int run_gui() {
+int run_gui(bool started_by_windows) {
     ImGui_ImplWin32_EnableDpiAwareness();
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    // Config guardada.
+    // Config guardada (en %APPDATA%; si todavia no hay, la vieja de al lado del
+    // .exe). Se guarda siempre en %APPDATA%.
     g.config_path = config_default_path();
-    config_load(g.cfg, g.config_path);
+    config_load_default(g.cfg);
     std::snprintf(g.out_dir_buf, sizeof(g.out_dir_buf), "%s", g.cfg.out_dir.c_str());
     refresh_devices();
 
@@ -1007,7 +1712,10 @@ int run_gui() {
         return 1;
     }
 
-    ShowWindow(hwnd, g.cfg.minimize_to_tray ? SW_HIDE : SW_SHOWDEFAULT);
+    // Escondido en la bandeja solo cuando lo abre Windows al encender la PC; si
+    // lo abris vos, se muestra la ventana.
+    bool start_hidden = started_by_windows && g.cfg.minimize_to_tray;
+    ShowWindow(hwnd, start_hidden ? SW_HIDE : SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
     tray_add(hwnd);
     create_toast(wc.hInstance);
@@ -1027,8 +1735,8 @@ int run_gui() {
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_d3dDevice, g_d3dContext);
 
-    // Si arranca en la bandeja, arrancamos a grabar de una.
-    if (g.cfg.minimize_to_tray) start_recording();
+    // "Empezar a grabar al abrir el programa".
+    if (g.cfg.record_on_start) start_recording();
 
     const float clear[4] = {0.09f, 0.09f, 0.11f, 1.0f};
     bool done = false;
@@ -1045,6 +1753,7 @@ int run_gui() {
         // hasta que llegue un mensaje (o 250 ms, para juntar el grabador si se
         // corto solo), asi en segundo plano no gasta ni CPU ni GPU.
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+            ed.player.pause(); // el editor no sigue sonando escondido
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 250, QS_ALLINPUT);
             reap_recorder();
             continue;
@@ -1091,6 +1800,11 @@ int run_gui() {
         g.recorder.reset();
     }
     save_config();
+
+    // Editor: el recorte que se este guardando termina; el reproductor se cierra.
+    if (ed.save_thread.joinable()) ed.save_thread.join();
+    ed.player.close();
+    editor_release_texture();
 
     tray_remove(hwnd);
     if (g_toast) DestroyWindow(g_toast);

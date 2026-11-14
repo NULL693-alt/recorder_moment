@@ -76,7 +76,9 @@ add_executable(recorder
     src/audio_encoder.cpp
     src/audio_devices.cpp
     src/clip_buffer.cpp
+    src/clip_editor.cpp
     src/config.cpp
+    src/game_detect.cpp
     src/recorder.cpp
 
     resources/recorder.rc
@@ -103,7 +105,9 @@ target_include_directories(recorder PRIVATE
 # propsys: leer el nombre de los dispositivos (audio_devices).  shell32:
 # bandeja del sistema y elegir carpeta.  advapi32: el arranque con Windows
 # (clave "Run" del registro).  dwmapi/comctl32: los usa el backend de ImGui
-# para Win32.  winmm: pedir el timer de 1 ms mientras graba.
+# para Win32.  winmm: pedir el timer de 1 ms mientras graba.  comdlg32: el
+# dialogo "Abrir otro..." del editor de clips.  version: leer el nombre del
+# juego del .exe (para la carpeta de cada juego).
 target_link_libraries(recorder PRIVATE
     ${FFMPEG_LIBS}
     d3d11
@@ -121,6 +125,8 @@ target_link_libraries(recorder PRIVATE
     dwmapi
     comctl32
     winmm
+    comdlg32
+    version
 )
 
 # Linkeamos estaticamente el runtime de MinGW (libstdc++, libgcc, pthread)
@@ -151,4 +157,34 @@ if(FFMPEG_DLLS)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${FFMPEG_DLLS} "$<TARGET_FILE_DIR:recorder>"
         COMMENT "Copiando DLLs de FFmpeg al lado del ejecutable")
+endif()
+
+# ---------------------------------------------------------------------------
+# Pruebas automaticas (tests/recorder_tests.cpp): buffer de clips, config,
+# conversion en la GPU y codificadores. Se corren con:
+#   ctest --test-dir build --output-on-failure
+# ---------------------------------------------------------------------------
+option(RECORDER_BUILD_TESTS "Compilar las pruebas automaticas" ON)
+if(RECORDER_BUILD_TESTS)
+    enable_testing()
+    add_executable(recorder_tests
+        tests/recorder_tests.cpp
+        src/clip_buffer.cpp
+        src/clip_editor.cpp
+        src/config.cpp
+        src/game_detect.cpp
+        src/gpu_convert.cpp
+        src/video_encoder.cpp
+        src/audio_encoder.cpp
+    )
+    target_include_directories(recorder_tests PRIVATE "${FFMPEG_INCLUDE_DIR}" src)
+    target_link_libraries(recorder_tests PRIVATE
+        ${FFMPEG_LIBS} d3d11 dxgi dxguid d3dcompiler uuid ole32 mmdevapi shell32 user32 version)
+    if(MINGW)
+        target_link_options(recorder_tests PRIVATE -static)
+    endif()
+    target_compile_options(recorder_tests PRIVATE -Wall)
+    # Las DLLs de FFmpeg ya quedan al lado (las copia el target recorder).
+    add_dependencies(recorder_tests recorder)
+    add_test(NAME recorder_tests COMMAND recorder_tests)
 endif()

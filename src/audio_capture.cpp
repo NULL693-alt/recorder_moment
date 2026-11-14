@@ -162,7 +162,8 @@ void AudioCapture::close_source(Source &s) {
 // open / close
 // ---------------------------------------------------------------------------
 bool AudioCapture::open(int sample_rate, int channels, const std::string &sys_id,
-                        const std::string &mic_id, bool enable_mic, float mic_gain) {
+                        const std::string &mic_id, bool enable_mic, float mic_gain,
+                        bool separate_tracks) {
     if (running_.load()) return true;
     sample_rate_ = sample_rate > 0 ? sample_rate : 48000;
     channels_ = channels > 0 ? channels : 2;
@@ -190,10 +191,13 @@ bool AudioCapture::open(int sample_rate, int channels, const std::string &sys_id
         close_source(mic_);
     }
 
+    // Pistas separadas solo tienen sentido si hay microfono.
+    separate_ = separate_tracks && has_mic_;
+
     stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     {
         std::lock_guard<std::mutex> lk(mutex_);
-        out_fifo_.clear();
+        for (std::vector<int16_t> &fifo : out_fifo_) fifo.clear();
     }
     start_us_ = now_us();
     produced_frames_ = 0;
@@ -217,9 +221,10 @@ void AudioCapture::close() {
 
     running_.store(false);
     has_mic_ = false;
+    separate_ = false;
     {
         std::lock_guard<std::mutex> lk(mutex_);
-        out_fifo_.clear();
+        for (std::vector<int16_t> &fifo : out_fifo_) fifo.clear();
     }
 
     if (com_inited_) { CoUninitialize(); com_inited_ = false; }
@@ -318,9 +323,13 @@ void AudioCapture::produce_locked() {
 
     while (todo > 0) {
         int block = (int)(todo < kChunk ? todo : kChunk);
-        size_t out_off = out_fifo_.size();
-        out_fifo_.resize(out_off + (size_t)block * channels_);
-        int16_t *dst = out_fifo_.data() + out_off;
+        // Destino de cada pista (sistema y microfono solo si van separadas).
+        int16_t *dst[3] = {nullptr, nullptr, nullptr};
+        for (int t = 0; t < track_count(); t++) {
+            size_t off = out_fifo_[t].size();
+            out_fifo_[t].resize(off + (size_t)block * channels_);
+            dst[t] = out_fifo_[t].data() + off;
+        }
 
         // Una fuente que se quedo sin datos espera a juntar el margen entero
         // antes de volver a sonar; si no, cada paquete que llega 1 ms tarde
@@ -337,12 +346,18 @@ void AudioCapture::produce_locked() {
             for (int c = 0; c < channels_; c++) {
                 int a = (f < sys_frames) ? sys_.fifo[(size_t)f * channels_ + c] : 0;
                 int b = (f < mic_frames && has_mic_) ? mic_.fifo[(size_t)f * channels_ + c] : 0;
-                if (mic_gain != 1.0f && b != 0)
+                if (mic_gain != 1.0f && b != 0) {
                     b = (int)(b * mic_gain + (b > 0 ? 0.5f : -0.5f));
+                    if (b > 32767) b = 32767;
+                    if (b < -32768) b = -32768;
+                }
                 int v = a + b;
                 if (v > 32767) v = 32767;
                 if (v < -32768) v = -32768;
-                dst[(size_t)f * channels_ + c] = (int16_t)v;
+                size_t i = (size_t)f * channels_ + c;
+                dst[kMix][i] = (int16_t)v;
+                if (dst[kSystem]) dst[kSystem][i] = (int16_t)a;
+                if (dst[kMic]) dst[kMic][i] = (int16_t)b;
             }
         }
 
@@ -371,8 +386,9 @@ void AudioCapture::produce_locked() {
 
     // Si nadie lee, no dejamos crecer la salida mas de 5 segundos.
     size_t max_out = (size_t)sample_rate_ * 5;
-    if (out_fifo_.size() > max_out * channels_)
-        out_fifo_.erase(out_fifo_.begin(), out_fifo_.end() - max_out * channels_);
+    for (std::vector<int16_t> &fifo : out_fifo_)
+        if (fifo.size() > max_out * channels_)
+            fifo.erase(fifo.begin(), fifo.end() - max_out * channels_);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,18 +423,19 @@ void AudioCapture::thread_main() {
 // ---------------------------------------------------------------------------
 int AudioCapture::available_frames() const {
     std::lock_guard<std::mutex> lk(mutex_);
-    return (int)(out_fifo_.size() / channels_);
+    return (int)(out_fifo_[kMix].size() / channels_);
 }
 
-int AudioCapture::read(int16_t *dst, int max_frames, int64_t *first_index) {
-    if (max_frames <= 0) return 0;
+int AudioCapture::read(int track, int16_t *dst, int max_frames, int64_t *first_index) {
+    if (max_frames <= 0 || track < 0 || track >= track_count()) return 0;
     std::lock_guard<std::mutex> lk(mutex_);
-    int avail = (int)(out_fifo_.size() / channels_);
-    // Lo que queda en out_fifo_ son las ultimas 'avail' muestras producidas.
+    std::vector<int16_t> &fifo = out_fifo_[track];
+    int avail = (int)(fifo.size() / channels_);
+    // Lo que queda en la pista son las ultimas 'avail' muestras producidas.
     if (first_index) *first_index = produced_frames_ - avail;
     int n = avail < max_frames ? avail : max_frames;
     if (n <= 0) return 0;
-    memcpy(dst, out_fifo_.data(), (size_t)n * channels_ * sizeof(int16_t));
-    out_fifo_.erase(out_fifo_.begin(), out_fifo_.begin() + (size_t)n * channels_);
+    memcpy(dst, fifo.data(), (size_t)n * channels_ * sizeof(int16_t));
+    fifo.erase(fifo.begin(), fifo.begin() + (size_t)n * channels_);
     return n;
 }
