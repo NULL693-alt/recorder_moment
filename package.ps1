@@ -53,8 +53,10 @@ COMO USARLO
   2. Haz doble clic en recorder.exe.
   3. Se abre una ventana. Ajusta la carpeta donde guardar, el monitor,
      los fps, el bitrate y los segundos del buffer.
-  4. Apreta "Iniciar". Mientras graba, apreta "Guardar clip" (o F9) para
-     guardar los ultimos N segundos en un .mp4.
+  4. Apreta "Iniciar". Mientras graba, apreta "Guardar clip" (o F9; el
+     atajo se puede cambiar) para guardar los ultimos N segundos en un .mp4.
+  5. En la parte "Recortar clips" podes ver un clip, marcar el momento
+     bueno y guardar solo ese pedazo (queda en la carpeta "Clips Edit").
 
   La ventana se puede cerrar (queda en la bandeja del sistema, junto al
   reloj). Click derecho en su icono para volver a abrirla o salir.
@@ -66,8 +68,9 @@ REQUISITOS
   - Windows 10 u 11 (64 bits).
   - Si no hay microfono igual graba; solo se pierde tu voz.
 
-Los clips se guardan en la carpeta que elijas (por defecto, la carpeta
-del programa), con nombres como clip_20261101_153000.mp4.
+Los clips se guardan en la carpeta que elijas (por defecto,
+Videos\recorder_moment), en una subcarpeta por juego, con nombres como
+clip_20261101_153000.mp4.
 
 No hace falta instalar nada: todo lo necesario esta en esta carpeta.
 "@ | Set-Content -Encoding UTF8 (Join-Path $pkg "LEEME.txt")
